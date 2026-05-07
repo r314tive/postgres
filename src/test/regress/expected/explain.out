@@ -108,6 +108,12 @@ select explain_filter('explain (analyze, waits, costs off, summary off, timing o
    Timeout:PgSleep calls=N time=N.N ms
 (3 rows)
 
+select explain_filter_to_json('explain (analyze, waits, costs off, summary off, timing off, buffers off, format json) select pg_sleep(0.01)') #> '{0,Wait Events,0}';
+                                     ?column?                                     
+----------------------------------------------------------------------------------
+ {"Time": 0.0, "Calls": 0, "Wait Event": "PgSleep", "Wait Event Type": "Timeout"}
+(1 row)
+
 explain (waits) select 1;
 ERROR:  EXPLAIN option WAITS requires ANALYZE
 \a

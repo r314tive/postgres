@@ -4551,7 +4551,6 @@ static void
 show_wait_event_usage(ExplainState *es, const WaitEventUsage *usage)
 {
 	WaitEventUsageEntry *entries;
-	List	   *events = NIL;
 
 	if (usage == NULL)
 		return;
@@ -4596,6 +4595,8 @@ show_wait_event_usage(ExplainState *es, const WaitEventUsage *usage)
 	}
 	else
 	{
+		ExplainOpenGroup("Wait-Events", "Wait Events", false, es);
+
 		for (int i = 0; i < usage->nentries; i++)
 		{
 			const char *event_type;
@@ -4603,15 +4604,22 @@ show_wait_event_usage(ExplainState *es, const WaitEventUsage *usage)
 
 			event_type = pgstat_get_wait_event_type(entries[i].wait_event_info);
 			event_name = pgstat_get_wait_event(entries[i].wait_event_info);
-			events = lappend(events,
-							 psprintf("%s:%s calls=%" PRIu64 " time=%0.3f ms",
-									  event_type ? event_type : "Unknown",
-									  event_name ? event_name : "unknown",
-									  entries[i].calls,
-									  INSTR_TIME_GET_MILLISEC(entries[i].time)));
+
+			ExplainOpenGroup("Wait-Event", NULL, true, es);
+			ExplainPropertyText("Wait Event Type",
+								event_type ? event_type : "Unknown",
+								es);
+			ExplainPropertyText("Wait Event",
+								event_name ? event_name : "unknown",
+								es);
+			ExplainPropertyUInteger("Calls", NULL, entries[i].calls, es);
+			ExplainPropertyFloat("Time", "ms",
+								 INSTR_TIME_GET_MILLISEC(entries[i].time),
+								 3, es);
+			ExplainCloseGroup("Wait-Event", NULL, true, es);
 		}
 
-		ExplainPropertyList("Wait Events", events, es);
+		ExplainCloseGroup("Wait-Events", "Wait Events", false, es);
 	}
 
 	if (entries)

@@ -97,6 +97,9 @@ begin;
 -- inlining from moving pg_sleep() out of the Bitmap Index Scan boundary.
 -- The planner GUCs below are likewise test-only scaffolding to make the
 -- node shape deterministic.
+-- The two JSONPath checks verify inclusive per-node attribution: the same
+-- runtime-key wait appears on the Bitmap Index Scan and its Bitmap Heap Scan
+-- parent, while query-level wait accounting still counts the wait once.
 create function pg_temp.explain_waits_sleep_int(int) returns int
   language plpgsql stable as $$begin perform pg_sleep(0.01); return $1; end$$;
 create temp table explain_waits_bitmap (a int);
@@ -110,6 +113,12 @@ select jsonb_path_query_first(
                          select * from explain_waits_bitmap
                          where a = pg_temp.explain_waits_sleep_int(1)') #> '{0,Plan}',
   '$.** ? (@."Node Type" == "Bitmap Index Scan")."Wait Events"[*] ? (@."Wait Event" == "PgSleep")'
+);
+select jsonb_path_query_first(
+  explain_filter_to_json('explain (analyze, waits, costs off, summary off, timing off, buffers off, format json)
+                         select * from explain_waits_bitmap
+                         where a = pg_temp.explain_waits_sleep_int(1)') #> '{0,Plan}',
+  '$.** ? (@."Node Type" == "Bitmap Heap Scan")."Wait Events"[*] ? (@."Wait Event" == "PgSleep")'
 );
 rollback;
 explain (waits) select 1;

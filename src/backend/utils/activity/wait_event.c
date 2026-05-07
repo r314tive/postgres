@@ -48,6 +48,13 @@ uint32	   *my_wait_event_info = &local_my_wait_event_info;
 
 int			pgstat_wait_event_usage_depth = 0;
 static WaitEventUsage *pgstat_wait_event_usage = NULL;
+
+/*
+ * Top of the active executor node stack.  Query-level wait accounting records
+ * each wait once in pgstat_wait_event_usage.  Per-node wait accounting records
+ * each wait in every active plan node, matching the inclusive timing semantics
+ * of EXPLAIN ANALYZE plan nodes.
+ */
 static WaitEventUsage *pgstat_wait_event_node_usage = NULL;
 static uint32 pgstat_wait_event_usage_current = 0;
 static instr_time pgstat_wait_event_usage_start;
@@ -387,9 +394,9 @@ pgstat_init_wait_event_usage(WaitEventUsage *usage, MemoryContext memcontext)
  *
  * This is intended for short-lived instrumentation such as EXPLAIN ANALYZE.
  * It records waits observed through pgstat_report_wait_start/end in backend
- * local memory.  Nested collection is deliberately treated as part of the
- * outer collection for now; callers that want independent nested accounting
- * need a stack of WaitEventUsage contexts.
+ * local memory.  Nested top-level collection is deliberately treated as part
+ * of the outer collection for now; callers that want independent nested
+ * accounting need a stack of query-level WaitEventUsage contexts.
  */
 void
 pgstat_begin_wait_event_usage(WaitEventUsage *usage, MemoryContext memcontext)
@@ -433,6 +440,9 @@ pgstat_enter_wait_event_usage(WaitEventUsage *usage)
 {
 	WaitEventUsage *previous = pgstat_wait_event_node_usage;
 
+	Assert(usage != NULL);
+
+	usage->active_parent = previous;
 	pgstat_wait_event_node_usage = usage;
 	return previous;
 }
@@ -440,6 +450,11 @@ pgstat_enter_wait_event_usage(WaitEventUsage *usage)
 void
 pgstat_restore_wait_event_usage(WaitEventUsage *usage)
 {
+	Assert(pgstat_wait_event_node_usage == NULL ||
+		   pgstat_wait_event_node_usage->active_parent == usage);
+
+	if (pgstat_wait_event_node_usage != NULL)
+		pgstat_wait_event_node_usage->active_parent = NULL;
 	pgstat_wait_event_node_usage = usage;
 }
 
@@ -484,8 +499,10 @@ pgstat_count_wait_event_end(void)
 					  pgstat_wait_event_usage_current,
 					  1,
 					  &elapsed);
-	if (pgstat_wait_event_node_usage != NULL)
-		WaitEventUsageAdd(pgstat_wait_event_node_usage,
+	for (WaitEventUsage *node_usage = pgstat_wait_event_node_usage;
+		 node_usage != NULL;
+		 node_usage = node_usage->active_parent)
+		WaitEventUsageAdd(node_usage,
 						  pgstat_wait_event_usage_current,
 						  1,
 						  &elapsed);

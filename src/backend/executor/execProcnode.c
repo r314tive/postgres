@@ -118,6 +118,7 @@
 #include "executor/nodeWindowAgg.h"
 #include "executor/nodeWorktablescan.h"
 #include "miscadmin.h"
+#include "utils/wait_event.h"
 #include "nodes/nodeFuncs.h"
 
 static TupleTableSlot *ExecProcNodeFirst(PlanState *node);
@@ -415,6 +416,16 @@ ExecInitNode(Plan *node, EState *estate, int eflags)
 	if (estate->es_instrument)
 		result->instrument = InstrAllocNode(estate->es_instrument,
 											result->async_capable);
+	if (estate->es_instrument & INSTRUMENT_WAITS)
+	{
+		MemoryContext oldcontext;
+
+		oldcontext = MemoryContextSwitchTo(estate->es_query_cxt);
+		result->wait_event_usage = palloc_object(WaitEventUsage);
+		pgstat_init_wait_event_usage(result->wait_event_usage,
+									 estate->es_query_cxt);
+		MemoryContextSwitchTo(oldcontext);
+	}
 
 	return result;
 }

@@ -101,14 +101,22 @@ select explain_filter('explain (buffers, format text) select * from int8_tbl i8'
 
 -- WAITS option
 select explain_filter('explain (analyze, waits, costs off, summary off, timing off, buffers off) select pg_sleep(0.01)');
-            explain_filter             
----------------------------------------
+             explain_filter              
+-----------------------------------------
  Result (actual rows=N.N loops=N)
+   Wait Events:
+     Timeout:PgSleep calls=N time=N.N ms
  Wait Events:
    Timeout:PgSleep calls=N time=N.N ms
-(3 rows)
+(5 rows)
 
 select explain_filter_to_json('explain (analyze, waits, costs off, summary off, timing off, buffers off, format json) select pg_sleep(0.01)') #> '{0,Wait Events,0}';
+                                     ?column?                                     
+----------------------------------------------------------------------------------
+ {"Time": 0.0, "Calls": 0, "Wait Event": "PgSleep", "Wait Event Type": "Timeout"}
+(1 row)
+
+select explain_filter_to_json('explain (analyze, waits, costs off, summary off, timing off, buffers off, format json) select pg_sleep(0.01)') #> '{0,Plan,Wait Events,0}';
                                      ?column?                                     
 ----------------------------------------------------------------------------------
  {"Time": 0.0, "Calls": 0, "Wait Event": "PgSleep", "Wait Event Type": "Timeout"}
@@ -124,6 +132,17 @@ select jsonb_path_query_first(
                          select pg_temp.parallel_pg_sleep(0.01)
                          from tenk1 where unique1 = 1') #> '{0,Wait Events}',
   '$[*] ? (@."Wait Event" == "PgSleep")'
+);
+                              jsonb_path_query_first                              
+----------------------------------------------------------------------------------
+ {"Time": 0.0, "Calls": 0, "Wait Event": "PgSleep", "Wait Event Type": "Timeout"}
+(1 row)
+
+select jsonb_path_query_first(
+  explain_filter_to_json('explain (analyze, waits, costs off, summary off, timing off, buffers off, format json)
+                         select pg_temp.parallel_pg_sleep(0.01)
+                         from tenk1 where unique1 = 1') #> '{0,Plan}',
+  '$.**."Wait Events"[*] ? (@."Wait Event" == "PgSleep")'
 );
                               jsonb_path_query_first                              
 ----------------------------------------------------------------------------------

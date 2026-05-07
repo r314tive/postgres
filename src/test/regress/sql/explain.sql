@@ -71,6 +71,7 @@ select explain_filter('explain (buffers, format text) select * from int8_tbl i8'
 -- WAITS option
 select explain_filter('explain (analyze, waits, costs off, summary off, timing off, buffers off) select pg_sleep(0.01)');
 select explain_filter_to_json('explain (analyze, waits, costs off, summary off, timing off, buffers off, format json) select pg_sleep(0.01)') #> '{0,Wait Events,0}';
+select explain_filter_to_json('explain (analyze, waits, costs off, summary off, timing off, buffers off, format json) select pg_sleep(0.01)') #> '{0,Plan,Wait Events,0}';
 begin;
 create function pg_temp.parallel_pg_sleep(float8) returns void
   language internal volatile parallel safe as 'pg_sleep';
@@ -81,6 +82,12 @@ select jsonb_path_query_first(
                          select pg_temp.parallel_pg_sleep(0.01)
                          from tenk1 where unique1 = 1') #> '{0,Wait Events}',
   '$[*] ? (@."Wait Event" == "PgSleep")'
+);
+select jsonb_path_query_first(
+  explain_filter_to_json('explain (analyze, waits, costs off, summary off, timing off, buffers off, format json)
+                         select pg_temp.parallel_pg_sleep(0.01)
+                         from tenk1 where unique1 = 1') #> '{0,Plan}',
+  '$.**."Wait Events"[*] ? (@."Wait Event" == "PgSleep")'
 );
 rollback;
 explain (waits) select 1;

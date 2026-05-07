@@ -91,6 +91,12 @@ select jsonb_path_query_first(
 );
 rollback;
 begin;
+-- This test deliberately creates a Bitmap Index Scan runtime-key wait.
+-- The STABLE PL/pgSQL wrapper is test scaffolding: STABLE lets the
+-- expression be used as an index runtime key, while PL/pgSQL prevents SQL
+-- inlining from moving pg_sleep() out of the Bitmap Index Scan boundary.
+-- The planner GUCs below are likewise test-only scaffolding to make the
+-- node shape deterministic.
 create function pg_temp.explain_waits_sleep_int(int) returns int
   language plpgsql stable as $$begin perform pg_sleep(0.01); return $1; end$$;
 create temp table explain_waits_bitmap (a int);

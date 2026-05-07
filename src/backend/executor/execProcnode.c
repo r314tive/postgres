@@ -492,7 +492,8 @@ ExecProcNodeFirst(PlanState *node)
  * This has essentially the same responsibilities as ExecProcNode,
  * but it does not do InstrStartNode/InstrStopNode (mainly because
  * it can't tell how many returned tuples to count).  Each per-node
- * function must provide its own instrumentation support.
+ * function must provide its own instrumentation support, including
+ * wait event attribution when enabled.
  * ----------------------------------------------------------------
  */
 Node *
@@ -769,6 +770,9 @@ ExecShutdownNode(PlanState *node)
 static bool
 ExecShutdownNode_walker(PlanState *node, void *context)
 {
+	bool		node_running;
+	WaitEventUsage *previous_wait_event_usage = NULL;
+
 	if (node == NULL)
 		return false;
 
@@ -784,8 +788,14 @@ ExecShutdownNode_walker(PlanState *node, void *context)
 	 * has never been executed, so as to avoid incorrectly making it appear
 	 * that it has.
 	 */
-	if (node->instrument && node->instrument->running)
+	node_running = node->instrument && node->instrument->running;
+	if (node_running)
+	{
 		InstrStartNode(node->instrument);
+		if (node->wait_event_usage)
+			previous_wait_event_usage =
+				pgstat_enter_wait_event_usage(node->wait_event_usage);
+	}
 
 	planstate_tree_walker(node, ExecShutdownNode_walker, context);
 
@@ -814,8 +824,12 @@ ExecShutdownNode_walker(PlanState *node, void *context)
 	}
 
 	/* Stop the node if we started it above, reporting 0 tuples. */
-	if (node->instrument && node->instrument->running)
+	if (node_running)
+	{
+		if (node->wait_event_usage)
+			pgstat_restore_wait_event_usage(previous_wait_event_usage);
 		InstrStopNode(node->instrument, 0);
+	}
 
 	return false;
 }

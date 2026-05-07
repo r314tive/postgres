@@ -150,6 +150,27 @@ select jsonb_path_query_first(
 (1 row)
 
 rollback;
+begin;
+create function pg_temp.explain_waits_sleep_int(int) returns int
+  language plpgsql stable as $$begin perform pg_sleep(0.01); return $1; end$$;
+create temp table explain_waits_bitmap (a int);
+insert into explain_waits_bitmap select g from generate_series(1, 10) g;
+create index explain_waits_bitmap_a_idx on explain_waits_bitmap(a);
+analyze explain_waits_bitmap;
+set local enable_seqscan = off;
+set local enable_indexscan = off;
+select jsonb_path_query_first(
+  explain_filter_to_json('explain (analyze, waits, costs off, summary off, timing off, buffers off, format json)
+                         select * from explain_waits_bitmap
+                         where a = pg_temp.explain_waits_sleep_int(1)') #> '{0,Plan}',
+  '$.** ? (@."Node Type" == "Bitmap Index Scan")."Wait Events"[*] ? (@."Wait Event" == "PgSleep")'
+);
+                              jsonb_path_query_first                              
+----------------------------------------------------------------------------------
+ {"Time": 0.0, "Calls": 0, "Wait Event": "PgSleep", "Wait Event Type": "Timeout"}
+(1 row)
+
+rollback;
 explain (waits) select 1;
 ERROR:  EXPLAIN option WAITS requires ANALYZE
 \a

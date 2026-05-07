@@ -27,6 +27,7 @@
 #include "storage/shmem.h"
 #include "storage/subsystems.h"
 #include "storage/spin.h"
+#include "utils/memutils.h"
 #include "utils/wait_event.h"
 
 
@@ -369,7 +370,16 @@ pgstat_init_wait_event_usage(WaitEventUsage *usage, MemoryContext memcontext)
 	Assert(memcontext != NULL);
 
 	memset(usage, 0, sizeof(WaitEventUsage));
-	usage->memcontext = memcontext;
+
+	/*
+	 * Wait events may end inside critical sections, for example while
+	 * performing synchronous I/O.  Keep usage entries in a dedicated context
+	 * where the memory manager permits that accounting path to grow.
+	 */
+	usage->memcontext = AllocSetContextCreate(memcontext,
+											  "Wait Event Usage",
+											  ALLOCSET_SMALL_SIZES);
+	MemoryContextAllowInCriticalSection(usage->memcontext, true);
 }
 
 /*

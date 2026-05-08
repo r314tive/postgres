@@ -100,7 +100,7 @@ extern char **GetWaitEventCustomNames(uint32 classId, int *nwaitevents);
 static inline void
 pgstat_report_wait_start(uint32 wait_event_info)
 {
-	if (pgstat_wait_event_usage_depth > 0)
+	if (unlikely(pgstat_wait_event_usage_depth > 0))
 		pgstat_count_wait_event_start(wait_event_info);
 
 	/*
@@ -119,7 +119,7 @@ pgstat_report_wait_start(uint32 wait_event_info)
 static inline void
 pgstat_report_wait_end(void)
 {
-	if (pgstat_wait_event_usage_depth > 0)
+	if (unlikely(pgstat_wait_event_usage_depth > 0))
 		pgstat_count_wait_event_end();
 
 	/* see pgstat_report_wait_start() */

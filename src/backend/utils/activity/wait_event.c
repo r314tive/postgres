@@ -42,6 +42,8 @@ static void WaitEventUsageAddOverflow(WaitEventUsage *usage, uint64 calls,
 									  const instr_time *elapsed);
 static int	WaitEventUsageFind(const WaitEventUsage *usage,
 							   uint32 wait_event_info, bool *found);
+static void WaitEventUsageInit(WaitEventUsage *usage,
+							   MemoryContext memcontext);
 
 
 static uint32 local_my_wait_event_info;
@@ -381,10 +383,25 @@ pgstat_reset_wait_event_storage(void)
 }
 
 /*
+ * Allocate and initialize a wait event usage accumulator.
+ */
+WaitEventUsage *
+pgstat_create_wait_event_usage(MemoryContext memcontext)
+{
+	WaitEventUsage *usage;
+
+	Assert(memcontext != NULL);
+
+	usage = MemoryContextAlloc(memcontext, sizeof(WaitEventUsage));
+	WaitEventUsageInit(usage, memcontext);
+	return usage;
+}
+
+/*
  * Initialize a wait event usage accumulator.
  */
-void
-pgstat_init_wait_event_usage(WaitEventUsage *usage, MemoryContext memcontext)
+static void
+WaitEventUsageInit(WaitEventUsage *usage, MemoryContext memcontext)
 {
 	Assert(usage != NULL);
 	Assert(memcontext != NULL);
@@ -423,7 +440,7 @@ pgstat_begin_wait_event_usage(WaitEventUsage *usage, MemoryContext memcontext)
 		INSTR_TIME_SET_ZERO(pgstat_wait_event_usage_start);
 	}
 
-	pgstat_init_wait_event_usage(usage, memcontext);
+	WaitEventUsageInit(usage, memcontext);
 	usage->query_parent = pgstat_wait_event_usage;
 	/*
 	 * A nested EXPLAIN can error out while one of its plan nodes is active,

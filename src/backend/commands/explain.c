@@ -4603,7 +4603,7 @@ show_wait_event_usage(ExplainState *es, const WaitEventUsage *usage)
 		{
 			ExplainIndentText(es);
 			appendStringInfo(es->str,
-							 "Unrecorded:Unrecorded calls=%" PRIu64 " time=%0.3f ms\n",
+							 "Unrecorded Wait Events: calls=%" PRIu64 " time=%0.3f ms\n",
 							 usage->overflowed_calls,
 							 INSTR_TIME_GET_MILLISEC(usage->overflowed_time));
 		}
@@ -4612,43 +4612,47 @@ show_wait_event_usage(ExplainState *es, const WaitEventUsage *usage)
 	}
 	else
 	{
-		ExplainOpenGroup("Wait-Events", "Wait Events", false, es);
-
-		for (int i = 0; i < usage->nentries; i++)
+		if (usage->nentries > 0)
 		{
-			const char *event_type;
-			const char *event_name;
+			ExplainOpenGroup("Wait-Events", "Wait Events", false, es);
 
-			event_type = pgstat_get_wait_event_type(entries[i].wait_event_info);
-			event_name = pgstat_get_wait_event(entries[i].wait_event_info);
+			for (int i = 0; i < usage->nentries; i++)
+			{
+				const char *event_type;
+				const char *event_name;
 
-			ExplainOpenGroup("Wait-Event", NULL, true, es);
-			ExplainPropertyText("Wait Event Type",
-								event_type ? event_type : "Unknown",
-								es);
-			ExplainPropertyText("Wait Event",
-								event_name ? event_name : "unknown",
-								es);
-			ExplainPropertyUInteger("Calls", NULL, entries[i].calls, es);
-			ExplainPropertyFloat("Time", "ms",
-								 INSTR_TIME_GET_MILLISEC(entries[i].time),
-								 3, es);
-			ExplainCloseGroup("Wait-Event", NULL, true, es);
+				event_type = pgstat_get_wait_event_type(entries[i].wait_event_info);
+				event_name = pgstat_get_wait_event(entries[i].wait_event_info);
+
+				ExplainOpenGroup("Wait-Event", NULL, true, es);
+				ExplainPropertyText("Wait Event Type",
+									event_type ? event_type : "Unknown",
+									es);
+				ExplainPropertyText("Wait Event",
+									event_name ? event_name : "unknown",
+									es);
+				ExplainPropertyUInteger("Calls", NULL, entries[i].calls, es);
+				ExplainPropertyFloat("Time", "ms",
+									 INSTR_TIME_GET_MILLISEC(entries[i].time),
+									 3, es);
+				ExplainCloseGroup("Wait-Event", NULL, true, es);
+			}
+
+			ExplainCloseGroup("Wait-Events", "Wait Events", false, es);
 		}
 
 		if (usage->overflowed_calls > 0)
 		{
-			ExplainOpenGroup("Wait-Event", NULL, true, es);
-			ExplainPropertyText("Wait Event Type", "Unrecorded", es);
-			ExplainPropertyText("Wait Event", "Unrecorded", es);
-			ExplainPropertyUInteger("Calls", NULL, usage->overflowed_calls, es);
-			ExplainPropertyFloat("Time", "ms",
+			/*
+			 * This is not a wait event identity, so keep it outside the
+			 * Wait Events array in structured output.
+			 */
+			ExplainPropertyUInteger("Unrecorded Wait Events", NULL,
+									usage->overflowed_calls, es);
+			ExplainPropertyFloat("Unrecorded Wait Event Time", "ms",
 								 INSTR_TIME_GET_MILLISEC(usage->overflowed_time),
 								 3, es);
-			ExplainCloseGroup("Wait-Event", NULL, true, es);
 		}
-
-		ExplainCloseGroup("Wait-Events", "Wait Events", false, es);
 	}
 
 	if (entries)

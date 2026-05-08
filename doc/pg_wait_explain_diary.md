@@ -73,3 +73,12 @@ event requires insertion and possible array growth.  This avoids a linear scan
 on the hot wait-end path without introducing a hash table into code that can
 run inside critical sections.  The remaining insertion cost is proportional to
 the number of distinct wait events already seen by that query or plan node.
+
+### User-facing documentation
+
+The `EXPLAIN` reference documentation promises three key semantics for
+`WAITS`: the top-level wait summary is the non-duplicated statement total,
+parallel worker waits are included in that total, and per-node wait events are
+inclusive like `EXPLAIN ANALYZE` node timing.  It also documents that wait
+timing is collected even with `TIMING OFF`, because `TIMING` controls plan-node
+execution timing rather than wait-event interval accounting.

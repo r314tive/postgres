@@ -39,6 +39,8 @@ static const char *pgstat_get_wait_timeout(WaitEventTimeout w);
 static const char *pgstat_get_wait_io(WaitEventIO w);
 static void WaitEventUsageAdd(WaitEventUsage *usage, uint32 wait_event_info,
 							  uint64 calls, const instr_time *elapsed);
+static int	WaitEventUsageFind(const WaitEventUsage *usage,
+							   uint32 wait_event_info, bool *found);
 
 
 static uint32 local_my_wait_event_info;
@@ -529,22 +531,47 @@ pgstat_accumulate_wait_event_usage(WaitEventUsage *usage,
 						  &entries[i].time);
 }
 
+/*
+ * Find the existing entry, or the insertion position for a new entry.
+ *
+ * WaitEventUsage entries are kept sorted by wait_event_info so the hot
+ * wait-end path does not need a linear scan through all distinct wait events
+ * already seen by the query or plan node.
+ */
+static int
+WaitEventUsageFind(const WaitEventUsage *usage, uint32 wait_event_info,
+				   bool *found)
+{
+	int			low = 0;
+	int			high = usage->nentries;
+
+	while (low < high)
+	{
+		int			mid = low + (high - low) / 2;
+		uint32		entry_info = usage->entries[mid].wait_event_info;
+
+		if (entry_info < wait_event_info)
+			low = mid + 1;
+		else
+			high = mid;
+	}
+
+	*found = low < usage->nentries &&
+		usage->entries[low].wait_event_info == wait_event_info;
+	return low;
+}
+
 static void
 WaitEventUsageAdd(WaitEventUsage *usage, uint32 wait_event_info,
 				  uint64 calls, const instr_time *elapsed)
 {
-	WaitEventUsageEntry *entry = NULL;
+	bool		found;
+	int			idx;
+	WaitEventUsageEntry *entry;
 
-	for (int i = 0; i < usage->nentries; i++)
-	{
-		if (usage->entries[i].wait_event_info == wait_event_info)
-		{
-			entry = &usage->entries[i];
-			break;
-		}
-	}
+	idx = WaitEventUsageFind(usage, wait_event_info, &found);
 
-	if (entry == NULL)
+	if (!found)
 	{
 		if (usage->nentries >= usage->maxentries)
 		{
@@ -569,11 +596,18 @@ WaitEventUsageAdd(WaitEventUsage *usage, uint32 wait_event_info,
 			usage->maxentries = newmaxentries;
 		}
 
-		entry = &usage->entries[usage->nentries++];
+		if (idx < usage->nentries)
+			memmove(&usage->entries[idx + 1], &usage->entries[idx],
+					sizeof(WaitEventUsageEntry) * (usage->nentries - idx));
+
+		entry = &usage->entries[idx];
+		usage->nentries++;
 		entry->wait_event_info = wait_event_info;
 		entry->calls = 0;
 		INSTR_TIME_SET_ZERO(entry->time);
 	}
+	else
+		entry = &usage->entries[idx];
 
 	entry->calls += calls;
 	INSTR_TIME_ADD(entry->time, *elapsed);

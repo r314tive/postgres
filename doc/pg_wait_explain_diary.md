@@ -64,3 +64,12 @@ measured interval's ownership explicit.  In normal PostgreSQL wait reporting
 the start and end calls bracket a blocking operation without executor stack
 movement, but using the start stack is the stricter model and avoids depending
 on that practical property.
+
+### Accumulator lookup
+
+`WaitEventUsage` uses a sorted vector keyed by `wait_event_info`.  Completed
+waits use binary search to find the entry; only first observation of a distinct
+event requires insertion and possible array growth.  This avoids a linear scan
+on the hot wait-end path without introducing a hash table into code that can
+run inside critical sections.  The remaining insertion cost is proportional to
+the number of distinct wait events already seen by that query or plan node.

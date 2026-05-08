@@ -39,6 +39,8 @@ static const char *pgstat_get_wait_timeout(WaitEventTimeout w);
 static const char *pgstat_get_wait_io(WaitEventIO w);
 static void WaitEventUsageAdd(WaitEventUsage *usage, uint32 wait_event_info,
 							  uint64 calls, const instr_time *elapsed);
+static void WaitEventUsageAddOverflow(WaitEventUsage *usage, uint64 calls,
+									  const instr_time *elapsed);
 static int	WaitEventUsageFind(const WaitEventUsage *usage,
 							   uint32 wait_event_info, bool *found);
 
@@ -52,13 +54,14 @@ int			pgstat_wait_event_usage_depth = 0;
 static WaitEventUsage *pgstat_wait_event_usage = NULL;
 
 /*
- * Top of the active executor node stack.  Query-level wait accounting records
- * each wait once in pgstat_wait_event_usage.  Per-node wait accounting records
- * each wait in every active plan node, matching the inclusive timing semantics
- * of EXPLAIN ANALYZE plan nodes.
+ * Top of the active executor node and query-level stacks.  Query-level wait
+ * accounting records each wait once in every active query-level collector.
+ * Per-node wait accounting records each wait in every active plan node,
+ * matching the inclusive timing semantics of EXPLAIN ANALYZE plan nodes.
  */
 static WaitEventUsage *pgstat_wait_event_node_usage = NULL;
 static WaitEventUsage *pgstat_wait_event_usage_node_stack = NULL;
+static WaitEventUsage *pgstat_wait_event_usage_query_stack = NULL;
 static uint32 pgstat_wait_event_usage_current = 0;
 static instr_time pgstat_wait_event_usage_start;
 
@@ -397,9 +400,8 @@ pgstat_init_wait_event_usage(WaitEventUsage *usage, MemoryContext memcontext)
  *
  * This is intended for short-lived instrumentation such as EXPLAIN ANALYZE.
  * It records waits observed through pgstat_report_wait_start/end in backend
- * local memory.  Nested top-level collection is deliberately treated as part
- * of the outer collection for now; callers that want independent nested
- * accounting need a stack of query-level WaitEventUsage contexts.
+ * local memory.  Nested top-level collectors are kept in a query-level stack;
+ * a wait is counted once in each active collector.
  */
 void
 pgstat_begin_wait_event_usage(WaitEventUsage *usage, MemoryContext memcontext)
@@ -407,12 +409,15 @@ pgstat_begin_wait_event_usage(WaitEventUsage *usage, MemoryContext memcontext)
 	Assert(usage != NULL);
 	Assert(memcontext != NULL);
 
+	pgstat_init_wait_event_usage(usage, memcontext);
+	usage->query_parent = pgstat_wait_event_usage;
+	pgstat_wait_event_usage = usage;
+
 	if (pgstat_wait_event_usage_depth++ == 0)
 	{
-		pgstat_init_wait_event_usage(usage, memcontext);
-		pgstat_wait_event_usage = usage;
 		pgstat_wait_event_node_usage = NULL;
 		pgstat_wait_event_usage_node_stack = NULL;
+		pgstat_wait_event_usage_query_stack = NULL;
 		pgstat_wait_event_usage_current = 0;
 		INSTR_TIME_SET_ZERO(pgstat_wait_event_usage_start);
 	}
@@ -426,15 +431,20 @@ pgstat_end_wait_event_usage(WaitEventUsage *usage)
 {
 	Assert(usage != NULL);
 	Assert(pgstat_wait_event_usage_depth > 0);
+	Assert(pgstat_wait_event_usage == usage);
+
+	if (pgstat_wait_event_usage_current != 0)
+		pgstat_count_wait_event_end();
+
+	pgstat_wait_event_usage = usage->query_parent;
+	usage->query_parent = NULL;
 
 	if (--pgstat_wait_event_usage_depth == 0)
 	{
-		if (pgstat_wait_event_usage_current != 0)
-			pgstat_count_wait_event_end();
-
 		pgstat_wait_event_usage = NULL;
 		pgstat_wait_event_node_usage = NULL;
 		pgstat_wait_event_usage_node_stack = NULL;
+		pgstat_wait_event_usage_query_stack = NULL;
 		pgstat_wait_event_usage_current = 0;
 		INSTR_TIME_SET_ZERO(pgstat_wait_event_usage_start);
 	}
@@ -479,6 +489,7 @@ pgstat_count_wait_event_start(uint32 wait_event_info)
 
 	pgstat_wait_event_usage_current = wait_event_info;
 	pgstat_wait_event_usage_node_stack = pgstat_wait_event_node_usage;
+	pgstat_wait_event_usage_query_stack = pgstat_wait_event_usage;
 	INSTR_TIME_SET_CURRENT(pgstat_wait_event_usage_start);
 }
 
@@ -499,10 +510,13 @@ pgstat_count_wait_event_end(void)
 	elapsed = end;
 	INSTR_TIME_SUBTRACT(elapsed, pgstat_wait_event_usage_start);
 
-	WaitEventUsageAdd(pgstat_wait_event_usage,
-					  pgstat_wait_event_usage_current,
-					  1,
-					  &elapsed);
+	for (WaitEventUsage *query_usage = pgstat_wait_event_usage_query_stack;
+		 query_usage != NULL;
+		 query_usage = query_usage->query_parent)
+		WaitEventUsageAdd(query_usage,
+						  pgstat_wait_event_usage_current,
+						  1,
+						  &elapsed);
 	for (WaitEventUsage *node_usage = pgstat_wait_event_usage_node_stack;
 		 node_usage != NULL;
 		 node_usage = node_usage->active_parent)
@@ -513,6 +527,7 @@ pgstat_count_wait_event_end(void)
 
 	pgstat_wait_event_usage_current = 0;
 	pgstat_wait_event_usage_node_stack = NULL;
+	pgstat_wait_event_usage_query_stack = NULL;
 	INSTR_TIME_SET_ZERO(pgstat_wait_event_usage_start);
 }
 
@@ -575,24 +590,51 @@ WaitEventUsageAdd(WaitEventUsage *usage, uint32 wait_event_info,
 	{
 		if (usage->nentries >= usage->maxentries)
 		{
-			MemoryContext oldcontext;
 			int			newmaxentries;
+			Size		entries_size;
+			WaitEventUsageEntry *newentries;
 
 			if (usage->maxentries > 0)
+			{
+				if ((Size) usage->maxentries >
+					MaxAllocSize / sizeof(WaitEventUsageEntry) / 2)
+				{
+					WaitEventUsageAddOverflow(usage, calls, elapsed);
+					return;
+				}
+
 				newmaxentries = usage->maxentries * 2;
+			}
 			else
 				newmaxentries = WAIT_EVENT_USAGE_INITIAL_EVENTS;
 
-			oldcontext = MemoryContextSwitchTo(usage->memcontext);
-			if (usage->entries)
-				usage->entries = repalloc_array(usage->entries,
-												WaitEventUsageEntry,
-												newmaxentries);
-			else
-				usage->entries = palloc_array(WaitEventUsageEntry,
-											  newmaxentries);
-			MemoryContextSwitchTo(oldcontext);
+			if ((Size) newmaxentries >
+				MaxAllocSize / sizeof(WaitEventUsageEntry))
+			{
+				WaitEventUsageAddOverflow(usage, calls, elapsed);
+				return;
+			}
 
+			entries_size = sizeof(WaitEventUsageEntry) * newmaxentries;
+			/*
+			 * Wait completion can happen in a critical section, so growth
+			 * must not throw ERROR.  If storage cannot be grown without
+			 * throwing, preserve total wait time in the overflow bucket.
+			 */
+			if (usage->entries)
+				newentries = repalloc_extended(usage->entries, entries_size,
+											   MCXT_ALLOC_NO_OOM);
+			else
+				newentries = MemoryContextAllocExtended(usage->memcontext,
+														entries_size,
+														MCXT_ALLOC_NO_OOM);
+			if (newentries == NULL)
+			{
+				WaitEventUsageAddOverflow(usage, calls, elapsed);
+				return;
+			}
+
+			usage->entries = newentries;
 			usage->maxentries = newmaxentries;
 		}
 
@@ -611,6 +653,14 @@ WaitEventUsageAdd(WaitEventUsage *usage, uint32 wait_event_info,
 
 	entry->calls += calls;
 	INSTR_TIME_ADD(entry->time, *elapsed);
+}
+
+static void
+WaitEventUsageAddOverflow(WaitEventUsage *usage, uint64 calls,
+						  const instr_time *elapsed)
+{
+	usage->overflowed_calls += calls;
+	INSTR_TIME_ADD(usage->overflowed_time, *elapsed);
 }
 
 /* ----------

@@ -73,6 +73,17 @@ select explain_filter('explain (analyze, waits, costs off, summary off, timing o
 select explain_filter_to_json('explain (analyze, waits, costs off, summary off, timing off, buffers off, format json) select pg_sleep(0.01)') #> '{0,Wait Events,0}';
 select explain_filter_to_json('explain (analyze, waits, costs off, summary off, timing off, buffers off, format json) select pg_sleep(0.01)') #> '{0,Plan,Wait Events,0}';
 begin;
+create function pg_temp.nested_explain_waits() returns void
+  language plpgsql as
+$$
+begin
+  perform explain_filter_to_json('explain (analyze, waits, costs off, summary off, timing off, buffers off, format json) select pg_sleep(0.01)');
+end;
+$$;
+select explain_filter_to_json('explain (analyze, waits, costs off, summary off, timing off, buffers off, format json) select pg_temp.nested_explain_waits()') #> '{0,Wait Events,0}';
+select explain_filter_to_json('explain (analyze, waits, costs off, summary off, timing off, buffers off, format json) select pg_temp.nested_explain_waits()') #> '{0,Plan,Wait Events,0}';
+rollback;
+begin;
 create function pg_temp.parallel_pg_sleep(float8) returns void
   language internal volatile parallel safe as 'pg_sleep';
 set local debug_parallel_query = on;

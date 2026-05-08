@@ -4563,7 +4563,7 @@ show_wait_event_usage(ExplainState *es, const WaitEventUsage *usage)
 	if (usage == NULL)
 		return;
 
-	if (usage->nentries == 0)
+	if (usage->nentries == 0 && usage->overflowed_calls == 0)
 		return;
 
 	if (usage->nentries > 0)
@@ -4599,6 +4599,15 @@ show_wait_event_usage(ExplainState *es, const WaitEventUsage *usage)
 							 INSTR_TIME_GET_MILLISEC(entries[i].time));
 		}
 
+		if (usage->overflowed_calls > 0)
+		{
+			ExplainIndentText(es);
+			appendStringInfo(es->str,
+							 "Unrecorded:Unrecorded calls=%" PRIu64 " time=%0.3f ms\n",
+							 usage->overflowed_calls,
+							 INSTR_TIME_GET_MILLISEC(usage->overflowed_time));
+		}
+
 		es->indent--;
 	}
 	else
@@ -4623,6 +4632,18 @@ show_wait_event_usage(ExplainState *es, const WaitEventUsage *usage)
 			ExplainPropertyUInteger("Calls", NULL, entries[i].calls, es);
 			ExplainPropertyFloat("Time", "ms",
 								 INSTR_TIME_GET_MILLISEC(entries[i].time),
+								 3, es);
+			ExplainCloseGroup("Wait-Event", NULL, true, es);
+		}
+
+		if (usage->overflowed_calls > 0)
+		{
+			ExplainOpenGroup("Wait-Event", NULL, true, es);
+			ExplainPropertyText("Wait Event Type", "Unrecorded", es);
+			ExplainPropertyText("Wait Event", "Unrecorded", es);
+			ExplainPropertyUInteger("Calls", NULL, usage->overflowed_calls, es);
+			ExplainPropertyFloat("Time", "ms",
+								 INSTR_TIME_GET_MILLISEC(usage->overflowed_time),
 								 3, es);
 			ExplainCloseGroup("Wait-Event", NULL, true, es);
 		}

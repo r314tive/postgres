@@ -26,9 +26,12 @@ typedef struct WaitEventUsage
 {
 	MemoryContext memcontext;
 	struct WaitEventUsage *active_parent; /* active plan-node stack link */
+	struct WaitEventUsage *query_parent;	/* active query-level stack link */
 	int			nentries;
 	int			maxentries;
 	WaitEventUsageEntry *entries;
+	uint64		overflowed_calls;
+	instr_time	overflowed_time;
 } WaitEventUsage;
 
 extern const char *pgstat_get_wait_event(uint32 wait_event_info);

@@ -15,6 +15,12 @@
 #include "utils/palloc.h"
 #include "utils/wait_event_types.h"
 
+/*
+ * EXPLAIN wait event accounting support.  WaitEventUsage is intentionally
+ * opaque outside wait_event.c; callers should allocate, accumulate, and read
+ * it through the functions below.  WaitEventUsageEntry is the reportable
+ * tuple copied to EXPLAIN output and parallel-worker storage.
+ */
 typedef struct WaitEventUsageEntry
 {
 	uint32		wait_event_info;
@@ -30,6 +36,8 @@ static inline void pgstat_report_wait_start(uint32 wait_event_info);
 static inline void pgstat_report_wait_end(void);
 extern void pgstat_set_wait_event_storage(uint32 *wait_event_info);
 extern void pgstat_reset_wait_event_storage(void);
+
+/* EXPLAIN wait event accounting. */
 extern WaitEventUsage *pgstat_create_wait_event_usage(MemoryContext memcontext);
 extern WaitEventUsage *pgstat_begin_wait_event_usage(MemoryContext memcontext);
 extern void pgstat_end_wait_event_usage(WaitEventUsage *usage);

@@ -53,3 +53,14 @@ Nested top-level wait collection is still treated as part of the outer
 collection.  The stack introduced here is the active plan-node stack for
 per-node attribution, not an independent stack of query-level collection
 contexts.
+
+## 2026-05-09
+
+### Attribution point
+
+Per-node wait attribution uses the active plan-node stack captured at wait
+start, not whatever stack happens to be active at wait end.  This makes the
+measured interval's ownership explicit.  In normal PostgreSQL wait reporting
+the start and end calls bracket a blocking operation without executor stack
+movement, but using the start stack is the stricter model and avoids depending
+on that practical property.

@@ -25,7 +25,7 @@ typedef struct WaitEventUsageEntry
 typedef struct WaitEventUsage
 {
 	MemoryContext memcontext;
-	struct WaitEventUsage *active_parent;
+	struct WaitEventUsage *active_parent; /* active plan-node stack link */
 	int			nentries;
 	int			maxentries;
 	WaitEventUsageEntry *entries;

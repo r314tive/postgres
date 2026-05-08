@@ -55,8 +55,10 @@ uint32	   *my_wait_event_info = &local_my_wait_event_info;
  */
 #define WAIT_EVENT_USAGE_MAX_EVENTS		64
 
-int			pgstat_wait_event_usage_depth = 0;
+/* Fast-path flag exported for inline pgstat_report_wait_start/end(). */
+bool		pgstat_wait_event_usage_active = false;
 static WaitEventUsage *pgstat_wait_event_usage = NULL;
+static int	pgstat_wait_event_usage_depth = 0;
 
 /*
  * Top of the active executor node and query-level stacks.  Query-level wait
@@ -431,6 +433,7 @@ pgstat_begin_wait_event_usage(WaitEventUsage *usage, MemoryContext memcontext)
 	usage->saved_node_usage = pgstat_wait_event_node_usage;
 	pgstat_wait_event_usage = usage;
 	pgstat_wait_event_usage_depth++;
+	pgstat_wait_event_usage_active = true;
 }
 
 /*
@@ -453,6 +456,7 @@ pgstat_end_wait_event_usage(WaitEventUsage *usage)
 
 	if (--pgstat_wait_event_usage_depth == 0)
 	{
+		pgstat_wait_event_usage_active = false;
 		pgstat_wait_event_usage = NULL;
 		pgstat_wait_event_node_usage = NULL;
 		pgstat_wait_event_usage_node_stack = NULL;

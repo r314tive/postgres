@@ -54,7 +54,7 @@ extern void pgstat_count_wait_event_start(uint32 wait_event_info);
 extern void pgstat_count_wait_event_end(void);
 
 extern PGDLLIMPORT uint32 *my_wait_event_info;
-extern PGDLLIMPORT int pgstat_wait_event_usage_depth;
+extern PGDLLIMPORT bool pgstat_wait_event_usage_active;
 
 
 /*
@@ -100,7 +100,7 @@ extern char **GetWaitEventCustomNames(uint32 classId, int *nwaitevents);
 static inline void
 pgstat_report_wait_start(uint32 wait_event_info)
 {
-	if (unlikely(pgstat_wait_event_usage_depth > 0))
+	if (unlikely(pgstat_wait_event_usage_active))
 		pgstat_count_wait_event_start(wait_event_info);
 
 	/*
@@ -119,7 +119,7 @@ pgstat_report_wait_start(uint32 wait_event_info)
 static inline void
 pgstat_report_wait_end(void)
 {
-	if (unlikely(pgstat_wait_event_usage_depth > 0))
+	if (unlikely(pgstat_wait_event_usage_active))
 		pgstat_count_wait_event_end();
 
 	/* see pgstat_report_wait_start() */

@@ -100,6 +100,26 @@ select explain_filter_to_json('explain (analyze, waits, costs off, summary off, 
 select explain_filter_to_json('explain (analyze, waits, costs off, summary off, timing off, buffers off, format json) select pg_temp.nested_explain_waits()') #> '{0,Plan,Wait Events,0}';
 rollback;
 begin;
+-- If a nested EXPLAIN errors while one of its plan nodes is active, ending
+-- that collector must restore the outer node wait-attribution stack.  The
+-- volatile division-by-zero helper keeps the error at execution time.
+create function pg_temp.explain_waits_divzero() returns int
+  language plpgsql volatile as $$begin return 1 / 0; end$$;
+create function pg_temp.nested_explain_waits_error() returns void
+  language plpgsql as
+$$
+begin
+  begin
+    perform explain_filter_to_json('explain (analyze, waits, costs off, summary off, timing off, buffers off, format json) select pg_temp.explain_waits_divzero()');
+  exception when division_by_zero then
+    null;
+  end;
+  perform pg_sleep(0.01);
+end;
+$$;
+select explain_filter_to_json('explain (analyze, waits, costs off, summary off, timing off, buffers off, format json) select pg_temp.nested_explain_waits_error()') #> '{0,Plan,Wait Events,0}';
+rollback;
+begin;
 create function pg_temp.parallel_pg_sleep(float8) returns void
   language internal volatile parallel safe as 'pg_sleep';
 set local debug_parallel_query = on;

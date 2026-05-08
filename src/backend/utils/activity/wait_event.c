@@ -406,14 +406,13 @@ pgstat_init_wait_event_usage(WaitEventUsage *usage, MemoryContext memcontext)
 void
 pgstat_begin_wait_event_usage(WaitEventUsage *usage, MemoryContext memcontext)
 {
+	bool		first;
+
 	Assert(usage != NULL);
 	Assert(memcontext != NULL);
 
-	pgstat_init_wait_event_usage(usage, memcontext);
-	usage->query_parent = pgstat_wait_event_usage;
-	pgstat_wait_event_usage = usage;
-
-	if (pgstat_wait_event_usage_depth++ == 0)
+	first = pgstat_wait_event_usage_depth == 0;
+	if (first)
 	{
 		pgstat_wait_event_node_usage = NULL;
 		pgstat_wait_event_usage_node_stack = NULL;
@@ -421,6 +420,17 @@ pgstat_begin_wait_event_usage(WaitEventUsage *usage, MemoryContext memcontext)
 		pgstat_wait_event_usage_current = 0;
 		INSTR_TIME_SET_ZERO(pgstat_wait_event_usage_start);
 	}
+
+	pgstat_init_wait_event_usage(usage, memcontext);
+	usage->query_parent = pgstat_wait_event_usage;
+	/*
+	 * A nested EXPLAIN can error out while one of its plan nodes is active,
+	 * skipping the usual node-level restore.  Remember the outer node stack so
+	 * ending this collector can discard any leaked inner node frames.
+	 */
+	usage->saved_node_usage = pgstat_wait_event_node_usage;
+	pgstat_wait_event_usage = usage;
+	pgstat_wait_event_usage_depth++;
 }
 
 /*
@@ -438,6 +448,8 @@ pgstat_end_wait_event_usage(WaitEventUsage *usage)
 
 	pgstat_wait_event_usage = usage->query_parent;
 	usage->query_parent = NULL;
+	pgstat_wait_event_node_usage = usage->saved_node_usage;
+	usage->saved_node_usage = NULL;
 
 	if (--pgstat_wait_event_usage_depth == 0)
 	{

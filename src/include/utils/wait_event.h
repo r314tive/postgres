@@ -27,6 +27,7 @@ typedef struct WaitEventUsage
 	MemoryContext memcontext;
 	struct WaitEventUsage *active_parent; /* active plan-node stack link */
 	struct WaitEventUsage *query_parent;	/* active query-level stack link */
+	struct WaitEventUsage *saved_node_usage;	/* node stack at query start */
 	int			nentries;
 	int			maxentries;
 	WaitEventUsageEntry *entries;

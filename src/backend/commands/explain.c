@@ -151,7 +151,7 @@ static bool peek_buffer_usage(ExplainState *es, const BufferUsage *usage);
 static void show_buffer_usage(ExplainState *es, const BufferUsage *usage);
 static void show_wal_usage(ExplainState *es, const WalUsage *usage);
 static int	wait_event_usage_cmp(const void *a, const void *b);
-static void show_wait_event_usage(ExplainState *es,
+static void show_wait_event_usage(ExplainState *es, const char *labelname,
 								  const WaitEventUsage *usage);
 static void show_memory_counters(ExplainState *es,
 								 const MemoryContextCounters *mem_counters);
@@ -219,7 +219,7 @@ ExplainQuery(ParseState *pstate, ExplainStmt *stmt,
 		 * In the case of an INSTEAD NOTHING, tell at least that.  But in
 		 * non-text format, the output is delimited, so this isn't necessary.
 		 */
-		if (es->format == EXPLAIN_FORMAT_TEXT)
+	if (es->format == EXPLAIN_FORMAT_TEXT)
 			appendStringInfoString(es->str, "Query rewrites to nothing\n");
 	}
 	else
@@ -634,7 +634,7 @@ ExplainOnePlan(PlannedStmt *plannedstmt, IntoClause *into, ExplainState *es,
 	ExplainPrintPlan(es, queryDesc);
 
 	if (waitEventUsagePtr)
-		show_wait_event_usage(es, waitEventUsagePtr);
+		show_wait_event_usage(es, "Statement Wait Events", waitEventUsagePtr);
 
 	/* Show buffer and/or memory usage in planning */
 	if (peek_buffer_usage(es, bufusage) || mem_counters)
@@ -2335,7 +2335,7 @@ ExplainNode(PlanState *planstate, List *ancestors,
 	if (es->wal && planstate->instrument)
 		show_wal_usage(es, &planstate->instrument->instr.walusage);
 	if (es->waits)
-		show_wait_event_usage(es, planstate->wait_event_usage);
+		show_wait_event_usage(es, "Wait Events", planstate->wait_event_usage);
 
 	/* Prepare per-worker buffer/WAL usage */
 	if (es->workers_state && (es->buffers || es->wal) && es->verbose)
@@ -4556,7 +4556,8 @@ wait_event_usage_cmp(const void *a, const void *b)
 }
 
 static void
-show_wait_event_usage(ExplainState *es, const WaitEventUsage *usage)
+show_wait_event_usage(ExplainState *es, const char *labelname,
+					  const WaitEventUsage *usage)
 {
 	WaitEventUsageEntry *entries;
 
@@ -4577,10 +4578,10 @@ show_wait_event_usage(ExplainState *es, const WaitEventUsage *usage)
 	else
 		entries = NULL;
 
-	if (es->format == EXPLAIN_FORMAT_TEXT)
+		if (es->format == EXPLAIN_FORMAT_TEXT)
 	{
 		ExplainIndentText(es);
-		appendStringInfoString(es->str, "Wait Events:\n");
+		appendStringInfo(es->str, "%s:\n", labelname);
 		es->indent++;
 
 		for (int i = 0; i < usage->nentries; i++)
@@ -4603,7 +4604,7 @@ show_wait_event_usage(ExplainState *es, const WaitEventUsage *usage)
 		{
 			ExplainIndentText(es);
 			appendStringInfo(es->str,
-							 "Unrecorded Wait Events: calls=%" PRIu64 " time=%0.3f ms\n",
+							 "Unrecorded Wait Event Calls: calls=%" PRIu64 " time=%0.3f ms\n",
 							 usage->overflowed_calls,
 							 INSTR_TIME_GET_MILLISEC(usage->overflowed_time));
 		}
@@ -4614,7 +4615,7 @@ show_wait_event_usage(ExplainState *es, const WaitEventUsage *usage)
 	{
 		if (usage->nentries > 0)
 		{
-			ExplainOpenGroup("Wait-Events", "Wait Events", false, es);
+			ExplainOpenGroup("Wait-Events", labelname, false, es);
 
 			for (int i = 0; i < usage->nentries; i++)
 			{
@@ -4638,7 +4639,7 @@ show_wait_event_usage(ExplainState *es, const WaitEventUsage *usage)
 				ExplainCloseGroup("Wait-Event", NULL, true, es);
 			}
 
-			ExplainCloseGroup("Wait-Events", "Wait Events", false, es);
+			ExplainCloseGroup("Wait-Events", labelname, false, es);
 		}
 
 		if (usage->overflowed_calls > 0)
@@ -4647,7 +4648,7 @@ show_wait_event_usage(ExplainState *es, const WaitEventUsage *usage)
 			 * This is not a wait event identity, so keep it outside the
 			 * Wait Events array in structured output.
 			 */
-			ExplainPropertyUInteger("Unrecorded Wait Events", NULL,
+			ExplainPropertyUInteger("Unrecorded Wait Event Calls", NULL,
 									usage->overflowed_calls, es);
 			ExplainPropertyFloat("Unrecorded Wait Event Time", "ms",
 								 INSTR_TIME_GET_MILLISEC(usage->overflowed_time),

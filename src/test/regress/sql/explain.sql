@@ -113,6 +113,9 @@ select jsonb_path_query_first(
   explain_filter_to_json('explain (analyze, waits, costs off, summary off, timing off, buffers off, format json) select pg_sleep(0.01)') #> '{0,Plan}',
   '$."Wait Events"[*] ? (@."Wait Event" == "PgSleep")'
 );
+select true as "waits xml statement tag ok"
+  from explain_filter('explain (analyze, waits, costs off, summary off, timing off, buffers off, format xml) select pg_sleep(0.01)') ln
+  where ln like '%<Statement-Wait-Events>%';
 begin;
 create function pg_temp.nested_explain_waits() returns void
   language plpgsql as

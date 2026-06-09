@@ -151,7 +151,8 @@ static bool peek_buffer_usage(ExplainState *es, const BufferUsage *usage);
 static void show_buffer_usage(ExplainState *es, const BufferUsage *usage);
 static void show_wal_usage(ExplainState *es, const WalUsage *usage);
 static int	wait_event_usage_cmp(const void *a, const void *b);
-static void show_wait_event_usage(ExplainState *es, const char *labelname,
+static void show_wait_event_usage(ExplainState *es, const char *xml_group_name,
+								  const char *labelname,
 								  const WaitEventUsage *usage);
 static void show_memory_counters(ExplainState *es,
 								 const MemoryContextCounters *mem_counters);
@@ -219,7 +220,7 @@ ExplainQuery(ParseState *pstate, ExplainStmt *stmt,
 		 * In the case of an INSTEAD NOTHING, tell at least that.  But in
 		 * non-text format, the output is delimited, so this isn't necessary.
 		 */
-	if (es->format == EXPLAIN_FORMAT_TEXT)
+		if (es->format == EXPLAIN_FORMAT_TEXT)
 			appendStringInfoString(es->str, "Query rewrites to nothing\n");
 	}
 	else
@@ -632,7 +633,8 @@ ExplainOnePlan(PlannedStmt *plannedstmt, IntoClause *into, ExplainState *es,
 	ExplainPrintPlan(es, queryDesc);
 
 	if (waitEventUsagePtr)
-		show_wait_event_usage(es, "Statement Wait Events", waitEventUsagePtr);
+		show_wait_event_usage(es, "Statement-Wait-Events",
+							  "Statement Wait Events", waitEventUsagePtr);
 
 	/* Show buffer and/or memory usage in planning */
 	if (peek_buffer_usage(es, bufusage) || mem_counters)
@@ -2333,7 +2335,8 @@ ExplainNode(PlanState *planstate, List *ancestors,
 	if (es->wal && planstate->instrument)
 		show_wal_usage(es, &planstate->instrument->instr.walusage);
 	if (es->waits)
-		show_wait_event_usage(es, "Wait Events", planstate->wait_event_usage);
+		show_wait_event_usage(es, "Wait-Events", "Wait Events",
+							  planstate->wait_event_usage);
 
 	/* Prepare per-worker buffer/WAL usage */
 	if (es->workers_state && (es->buffers || es->wal) && es->verbose)
@@ -4554,7 +4557,8 @@ wait_event_usage_cmp(const void *a, const void *b)
 }
 
 static void
-show_wait_event_usage(ExplainState *es, const char *labelname,
+show_wait_event_usage(ExplainState *es, const char *xml_group_name,
+					  const char *labelname,
 					  const WaitEventUsage *usage)
 {
 	const WaitEventUsageEntry *usage_entries;
@@ -4622,7 +4626,7 @@ show_wait_event_usage(ExplainState *es, const char *labelname,
 	{
 		if (nentries > 0)
 		{
-			ExplainOpenGroup("Wait-Events", labelname, false, es);
+			ExplainOpenGroup(xml_group_name, labelname, false, es);
 
 			for (int i = 0; i < nentries; i++)
 			{
@@ -4646,7 +4650,7 @@ show_wait_event_usage(ExplainState *es, const char *labelname,
 				ExplainCloseGroup("Wait-Event", NULL, true, es);
 			}
 
-			ExplainCloseGroup("Wait-Events", labelname, false, es);
+			ExplainCloseGroup(xml_group_name, labelname, false, es);
 		}
 
 		if (overflowed_calls > 0)

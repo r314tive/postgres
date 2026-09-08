@@ -32,6 +32,7 @@
 #include "common/file_perm.h"
 #include "common/file_utils.h"
 #include "common/logging.h"
+#include "common/pg_parse_lsn.h"
 #include "fe_utils/option_utils.h"
 #include "fe_utils/recovery_gen.h"
 #include "getopt_long.h"
@@ -480,18 +481,16 @@ reached_end_position(XLogRecPtr segendpos, uint32 timeline,
 		r = select(bgpipe[0] + 1, &fds, NULL, NULL, &tv);
 		if (r == 1)
 		{
+			ssize_t		nread;
 			char		xlogend[64] = {0};
-			uint32		hi,
-						lo;
 
-			r = read(bgpipe[0], xlogend, sizeof(xlogend) - 1);
-			if (r < 0)
+			nread = read(bgpipe[0], xlogend, sizeof(xlogend) - 1);
+			if (nread < 0)
 				pg_fatal("could not read from ready pipe: %m");
 
-			if (sscanf(xlogend, "%X/%08X", &hi, &lo) != 2)
+			if (!pg_parse_lsn(xlogend, &xlogendptr))
 				pg_fatal("could not parse write-ahead log location \"%s\"",
 						 xlogend);
-			xlogendptr = ((uint64) hi) << 32 | lo;
 			has_xlogendptr = 1;
 
 			/*
@@ -619,8 +618,6 @@ StartLogStreamer(char *startpos, uint32 timeline, char *sysidentifier,
 				 int wal_compress_level)
 {
 	logstreamer_param *param;
-	uint32		hi,
-				lo;
 	char		statusdir[MAXPGPATH];
 
 	param = pg_malloc0_object(logstreamer_param);
@@ -630,10 +627,9 @@ StartLogStreamer(char *startpos, uint32 timeline, char *sysidentifier,
 	param->wal_compress_level = wal_compress_level;
 
 	/* Convert the starting position */
-	if (sscanf(startpos, "%X/%08X", &hi, &lo) != 2)
+	if (!pg_parse_lsn(startpos, &param->startptr))
 		pg_fatal("could not parse write-ahead log location \"%s\"",
 				 startpos);
-	param->startptr = ((uint64) hi) << 32 | lo;
 	/* Round off to even segment position */
 	param->startptr -= XLogSegmentOffset(param->startptr, WalSegSz);
 
@@ -796,7 +792,7 @@ progress_update_filename(const char *filename)
 	/* We needn't maintain this variable if not doing verbose reports. */
 	if (showprogress && verbose)
 	{
-		free(progress_filename);
+		pg_free(progress_filename);
 		if (filename)
 			progress_filename = pg_strdup(filename);
 		else
@@ -1082,8 +1078,8 @@ CreateBackupStreamer(char *archive_name, char *spclocation,
 	inject_manifest = (format == 't' && strcmp(basedir, "-") == 0 && manifest);
 
 	/* Check whether it is a tar archive and its compression type */
-	is_tar = parse_tar_compress_algorithm(archive_name,
-										  &compressed_tar_algorithm);
+	is_tar = (parse_tar_compress_algorithm(archive_name,
+										   &compressed_tar_algorithm) > 0);
 
 	/* Is this any kind of compressed tar? */
 	is_compressed_tar = (is_tar &&
@@ -1282,7 +1278,7 @@ ReceiveArchiveStream(PGconn *conn, pg_compress_specification *compress)
 	ReceiveCopyData(conn, ReceiveArchiveStreamChunk, &state);
 
 	/* If we wrote the backup manifest to a file, close the file. */
-	if (state.manifest_file !=NULL)
+	if (state.manifest_file != NULL)
 	{
 		fclose(state.manifest_file);
 		state.manifest_file = NULL;
@@ -1341,7 +1337,7 @@ ReceiveArchiveStreamChunk(size_t r, char *copybuf, void *callback_data)
 
 				/* Sanity check. */
 				if (state->manifest_buffer != NULL ||
-					state->manifest_file !=NULL)
+					state->manifest_file != NULL)
 					pg_fatal("archives must precede manifest");
 
 				/* Parse the rest of the CopyData message. */
@@ -1406,7 +1402,7 @@ ReceiveArchiveStreamChunk(size_t r, char *copybuf, void *callback_data)
 					appendPQExpBuffer(state->manifest_buffer, copybuf + 1,
 									  r - 1);
 				}
-				else if (state->manifest_file !=NULL)
+				else if (state->manifest_file != NULL)
 				{
 					/* Manifest data, write to disk. */
 					if (fwrite(copybuf + 1, r - 1, 1,
@@ -1822,7 +1818,7 @@ BaseBackup(char *compression_algorithm, char *compression_detail,
 	{
 		int			fd;
 		char		mbuf[65536];
-		int			nbytes;
+		ssize_t		nbytes;
 
 		/* Reject if server is too old. */
 		if (serverVersion < MINIMUM_VERSION_FOR_WAL_SUMMARIES)
@@ -2215,8 +2211,6 @@ BaseBackup(char *compression_algorithm, char *compression_detail,
 		 * casting to a different size on WIN64.
 		 */
 		intptr_t	bgchild_handle = bgchild;
-		uint32		hi,
-					lo;
 #endif
 
 		if (verbose)
@@ -2242,10 +2236,9 @@ BaseBackup(char *compression_algorithm, char *compression_detail,
 		 * value directly in the variable, and then set the flag that says
 		 * it's there.
 		 */
-		if (sscanf(xlogend, "%X/%08X", &hi, &lo) != 2)
+		if (!pg_parse_lsn(xlogend, &xlogendptr))
 			pg_fatal("could not parse write-ahead log location \"%s\"",
 					 xlogend);
-		xlogendptr = ((uint64) hi) << 32 | lo;
 		InterlockedIncrement(&has_xlogendptr);
 
 		/* First wait for the thread to exit */
@@ -2857,7 +2850,7 @@ main(int argc, char **argv)
 
 		if (symlink(xlog_dir, linkloc) != 0)
 			pg_fatal("could not create symbolic link \"%s\": %m", linkloc);
-		free(linkloc);
+		pfree(linkloc);
 	}
 
 	BaseBackup(compression_algorithm, compression_detail, compressloc,

@@ -99,7 +99,7 @@ pgrename(const char *from, const char *to)
  * Check if _pglstat64()'s reason for failure was STATUS_DELETE_PENDING.
  * This doesn't apply to Cygwin, which has its own lstat() that would report
  * the case as EACCES.
-*/
+ */
 static bool
 lstat_error_was_status_delete_pending(void)
 {
@@ -305,7 +305,7 @@ pgsymlink(const char *oldpath, const char *newpath)
 /*
  *	pgreadlink - uses Win32 junction points
  */
-int
+ssize_t
 pgreadlink(const char *path, char *buf, size_t size)
 {
 	DWORD		attr;
@@ -389,7 +389,17 @@ pgreadlink(const char *path, char *buf, size_t size)
 
 	if (r <= 0)
 	{
-		errno = EINVAL;
+		/*
+		 * If the buffer is not sufficient, we must return a different errno
+		 * than EINVAL, because callers will take EINVAL to mean it was not a
+		 * symlink.  The correct POSIX behavior would be to fill the buffer up
+		 * to the size, but we can't easily do that here.
+		 */
+		if (GetLastError() == ERROR_INSUFFICIENT_BUFFER)
+			errno = ENAMETOOLONG;
+		else
+			errno = EINVAL;
+
 		return -1;
 	}
 

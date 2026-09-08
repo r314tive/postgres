@@ -201,8 +201,7 @@ multirange_in(PG_FUNCTION_ARGS)
 					if (range_capacity == range_count)
 					{
 						range_capacity *= 2;
-						ranges = (RangeType **)
-							repalloc(ranges, range_capacity * sizeof(RangeType *));
+						ranges = repalloc_array(ranges, RangeType *, range_capacity);
 					}
 					ranges_seen++;
 					if (!InputFunctionCallSafe(&cache->typioproc,
@@ -340,7 +339,7 @@ multirange_recv(PG_FUNCTION_ARGS)
 	Oid			mltrngtypoid = PG_GETARG_OID(1);
 	int32		typmod = PG_GETARG_INT32(2);
 	MultirangeIOData *cache;
-	uint32		range_count;
+	int32		range_count;
 	RangeType **ranges;
 	MultirangeType *ret;
 	StringInfoData tmpbuf;
@@ -348,6 +347,7 @@ multirange_recv(PG_FUNCTION_ARGS)
 	cache = get_multirange_io_data(fcinfo, mltrngtypoid, IOFunc_receive);
 
 	range_count = pq_getmsgint(buf, 4);
+	/* palloc_array will enforce a more-or-less-sane range_count value */
 	ranges = palloc_array(RangeType *, range_count);
 
 	initStringInfo(&tmpbuf);
@@ -722,11 +722,11 @@ multirange_get_range(TypeCacheEntry *rangetyp,
 	 * exact size.
 	 */
 	if (RANGE_HAS_LBOUND(flags))
-		ptr = (char *) att_addlength_pointer(ptr, typlen, ptr);
+		ptr = att_addlength_pointer(ptr, typlen, ptr);
 	if (RANGE_HAS_UBOUND(flags))
 	{
 		ptr = (char *) att_align_pointer(ptr, typalign, typlen, ptr);
-		ptr = (char *) att_addlength_pointer(ptr, typlen, ptr);
+		ptr = att_addlength_pointer(ptr, typlen, ptr);
 	}
 	len = (ptr - begin) + sizeof(RangeType) + sizeof(uint8);
 
@@ -773,7 +773,7 @@ multirange_get_bounds(TypeCacheEntry *rangetyp,
 	{
 		/* att_align_pointer cannot be necessary here */
 		lbound = fetch_att(ptr, typbyval, typlen);
-		ptr = (char *) att_addlength_pointer(ptr, typlen, ptr);
+		ptr = att_addlength_pointer(ptr, typlen, ptr);
 	}
 	else
 		lbound = (Datum) 0;
@@ -1003,7 +1003,7 @@ multirange_constructor2(PG_FUNCTION_ARGS)
 		deconstruct_array(rangeArray, rngtypid, rangetyp->typlen, rangetyp->typbyval,
 						  rangetyp->typalign, &elements, &nulls, &range_count);
 
-		ranges = palloc0(range_count * sizeof(RangeType *));
+		ranges = palloc0_array(RangeType *, range_count);
 		for (i = 0; i < range_count; i++)
 		{
 			if (nulls[i])
@@ -1107,7 +1107,7 @@ multirange_union(PG_FUNCTION_ARGS)
 	multirange_deserialize(typcache->rngtype, mr2, &range_count2, &ranges2);
 
 	range_count3 = range_count1 + range_count2;
-	ranges3 = palloc0(range_count3 * sizeof(RangeType *));
+	ranges3 = palloc0_array(RangeType *, range_count3);
 	memcpy(ranges3, ranges1, range_count1 * sizeof(RangeType *));
 	memcpy(ranges3 + range_count1, ranges2, range_count2 * sizeof(RangeType *));
 	PG_RETURN_MULTIRANGE_P(make_multirange(typcache->type_id, typcache->rngtype,
@@ -1161,7 +1161,7 @@ multirange_minus_internal(Oid mltrngtypoid, TypeCacheEntry *rangetyp,
 	 * Worst case: every range in ranges1 makes a different cut to some range
 	 * in ranges2.
 	 */
-	ranges3 = palloc0((range_count1 + range_count2) * sizeof(RangeType *));
+	ranges3 = palloc0_array(RangeType *, range_count1 + range_count2);
 	range_count3 = 0;
 
 	/*
@@ -1358,7 +1358,7 @@ multirange_intersect_internal(Oid mltrngtypoid, TypeCacheEntry *rangetyp,
 	 * but one extra won't hurt.
 	 *-----------------------------------------------
 	 */
-	ranges3 = palloc0((range_count1 + range_count2) * sizeof(RangeType *));
+	ranges3 = palloc0_array(RangeType *, range_count1 + range_count2);
 	range_count3 = 0;
 
 	/*
@@ -1471,7 +1471,7 @@ range_agg_finalfn(PG_FUNCTION_ARGS)
 	mltrngtypoid = get_fn_expr_rettype(fcinfo->flinfo);
 	typcache = multirange_get_typcache(fcinfo, mltrngtypoid);
 
-	ranges = palloc0(range_count * sizeof(RangeType *));
+	ranges = palloc0_array(RangeType *, range_count);
 	for (i = 0; i < range_count; i++)
 		ranges[i] = DatumGetRangeTypeP(state->dvalues[i]);
 

@@ -507,8 +507,8 @@ construct_connection_params(ForeignServer *server, UserMapping *user,
 	 * required scram pass-through options.
 	 */
 	n = list_length(server->options) + list_length(user->options) + 4 + 3;
-	keywords = (const char **) palloc(n * sizeof(char *));
-	values = (const char **) palloc(n * sizeof(char *));
+	keywords = palloc_array(const char *, n);
+	values = palloc_array(const char *, n);
 
 	n = 0;
 	n += ExtractConnectionOptions(server->options,
@@ -580,28 +580,31 @@ construct_connection_params(ForeignServer *server, UserMapping *user,
 	if (MyProcPort != NULL && MyProcPort->has_scram_keys && UseScramPassthrough(server, user))
 	{
 		int			len;
+		char	   *encoded;
 		int			encoded_len;
 
 		keywords[n] = "scram_client_key";
 		len = pg_b64_enc_len(sizeof(MyProcPort->scram_ClientKey));
 		/* don't forget the zero-terminator */
-		values[n] = palloc0(len + 1);
+		encoded = palloc0(len + 1);
 		encoded_len = pg_b64_encode(MyProcPort->scram_ClientKey,
 									sizeof(MyProcPort->scram_ClientKey),
-									(char *) values[n], len);
+									encoded, len);
 		if (encoded_len < 0)
 			elog(ERROR, "could not encode SCRAM client key");
+		values[n] = encoded;
 		n++;
 
 		keywords[n] = "scram_server_key";
 		len = pg_b64_enc_len(sizeof(MyProcPort->scram_ServerKey));
 		/* don't forget the zero-terminator */
-		values[n] = palloc0(len + 1);
+		encoded = palloc0(len + 1);
 		encoded_len = pg_b64_encode(MyProcPort->scram_ServerKey,
 									sizeof(MyProcPort->scram_ServerKey),
-									(char *) values[n], len);
+									encoded, len);
 		if (encoded_len < 0)
 			elog(ERROR, "could not encode SCRAM server key");
+		values[n] = encoded;
 		n++;
 
 		/*
@@ -638,6 +641,7 @@ connect_pg_server(ForeignServer *server, UserMapping *user)
 		const char **keywords;
 		const char **values;
 		char	   *appname;
+		PGconn	   *start_conn;
 
 		construct_connection_params(server, user, &keywords, &values, &appname);
 
@@ -646,9 +650,13 @@ connect_pg_server(ForeignServer *server, UserMapping *user)
 			pgfdw_we_connect = WaitEventExtensionNew("PostgresFdwConnect");
 
 		/* OK to make connection */
-		conn = libpqsrv_connect_params(keywords, values,
-									   false,	/* expand_dbname */
-									   pgfdw_we_connect);
+		start_conn =
+			libpqsrv_connect_params_start(keywords, values,
+										   /* expand_dbname = */ false);
+		PQsetNoticeReceiver(start_conn, libpqsrv_notice_receiver,
+							"received message via remote connection");
+		libpqsrv_connect_complete(start_conn, pgfdw_we_connect);
+		conn = start_conn;
 
 		if (!conn || PQstatus(conn) != CONNECTION_OK)
 			ereport(ERROR,
@@ -656,9 +664,6 @@ connect_pg_server(ForeignServer *server, UserMapping *user)
 					 errmsg("could not connect to server \"%s\"",
 							server->servername),
 					 errdetail_internal("%s", pchomp(PQerrorMessage(conn)))));
-
-		PQsetNoticeReceiver(conn, libpqsrv_notice_receiver,
-							"received message via remote connection");
 
 		/* Perform post-connection security checks. */
 		pgfdw_security_check(keywords, values, user, conn);
@@ -715,12 +720,18 @@ UserMappingPasswordRequired(UserMapping *user)
 	return true;
 }
 
+/*
+ * Return whether SCRAM pass-through is enabled.
+ *
+ * If use_scram_passthrough is specified in both the foreign server
+ * and the user mapping, the user mapping setting takes precedence.
+ */
 static bool
 UseScramPassthrough(ForeignServer *server, UserMapping *user)
 {
 	ListCell   *cell;
 
-	foreach(cell, server->options)
+	foreach(cell, user->options)
 	{
 		DefElem    *def = (DefElem *) lfirst(cell);
 
@@ -728,7 +739,7 @@ UseScramPassthrough(ForeignServer *server, UserMapping *user)
 			return defGetBoolean(def);
 	}
 
-	foreach(cell, user->options)
+	foreach(cell, server->options)
 	{
 		DefElem    *def = (DefElem *) lfirst(cell);
 
@@ -2470,6 +2481,18 @@ postgres_fdw_connection(PG_FUNCTION_ARGS)
 	const char **values;
 	char	   *appname;
 	char	   *sep = "";
+
+	/*
+	 * SCRAM pass-through cannot work for subscriptions because the connection
+	 * happens in a worker process.
+	 */
+	if (UseScramPassthrough(server, user))
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("SCRAM pass-through authentication is not supported for subscription connections"),
+				 errdetail("The foreign server or user mapping for user \"%s\" has \"use_scram_passthrough\" enabled.",
+						   GetUserNameFromId(userid, false)),
+				 errhint("Store a password in the user mapping instead.")));
 
 	construct_connection_params(server, user, &keywords, &values, &appname);
 

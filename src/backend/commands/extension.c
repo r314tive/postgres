@@ -513,6 +513,7 @@ is_extension_script_filename(const char *filename)
 static List *
 get_extension_control_directories(void)
 {
+#define EXTENSION_SYSTEM_MACRO  "$system"
 	char		sharepath[MAXPGPATH];
 	char	   *system_dir;
 	char	   *ecp;
@@ -526,7 +527,7 @@ get_extension_control_directories(void)
 	{
 		ExtensionLocation *location = palloc_object(ExtensionLocation);
 
-		location->macro = NULL;
+		location->macro = pstrdup(EXTENSION_SYSTEM_MACRO);
 		location->loc = system_dir;
 		paths = lappend(paths, location);
 	}
@@ -556,10 +557,10 @@ get_extension_control_directories(void)
 			 * Substitute the path macro if needed or append "extension"
 			 * suffix if it is a custom extension control path.
 			 */
-			if (strcmp(piece, "$system") == 0)
+			if (strcmp(piece, EXTENSION_SYSTEM_MACRO) == 0)
 			{
 				location->macro = pstrdup(piece);
-				mangled = substitute_path_macro(piece, "$system", system_dir);
+				mangled = substitute_path_macro(piece, EXTENSION_SYSTEM_MACRO, system_dir);
 			}
 			else
 			{
@@ -582,6 +583,7 @@ get_extension_control_directories(void)
 	}
 
 	return paths;
+#undef EXTENSION_SYSTEM_MACRO
 }
 
 /*
@@ -1453,8 +1455,8 @@ execute_extension_script(Oid extensionOid, ExtensionControlFile *control,
 			Datum		old = t_sql;
 			char	   *reqextname = (char *) lfirst(lc);
 			Oid			reqschema = lfirst_oid(lc2);
-			char	   *schemaName = get_namespace_name(reqschema);
-			const char *qSchemaName = quote_identifier(schemaName);
+			char	   *reqSchemaName = get_namespace_name(reqschema);
+			const char *qReqSchemaName = quote_identifier(reqSchemaName);
 			char	   *repltoken;
 
 			repltoken = psprintf("@extschema:%s@", reqextname);
@@ -1462,8 +1464,8 @@ execute_extension_script(Oid extensionOid, ExtensionControlFile *control,
 											C_COLLATION_OID,
 											t_sql,
 											CStringGetTextDatum(repltoken),
-											CStringGetTextDatum(qSchemaName));
-			if (t_sql != old && strpbrk(schemaName, quoting_relevant_chars))
+											CStringGetTextDatum(qReqSchemaName));
+			if (t_sql != old && strpbrk(reqSchemaName, quoting_relevant_chars))
 				ereport(ERROR,
 						(errcode(ERRCODE_INVALID_TEXT_REPRESENTATION),
 						 errmsg("invalid character in extension \"%s\" schema: must not contain any of \"%s\"",
@@ -2749,7 +2751,7 @@ convert_requires_to_datum(List *requires)
 	ListCell   *lc;
 
 	ndatums = list_length(requires);
-	datums = (Datum *) palloc(ndatums * sizeof(Datum));
+	datums = palloc_array(Datum, ndatums);
 	ndatums = 0;
 	foreach(lc, requires)
 	{
@@ -3431,7 +3433,7 @@ AlterExtensionNamespace(const char *extensionName, const char *newschema, Oid *o
 					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 					 errmsg("extension \"%s\" does not support SET SCHEMA",
 							NameStr(extForm->extname)),
-					 errdetail("%s is not in the extension's schema \"%s\"",
+					 errdetail("%s is not in the extension's schema \"%s\".",
 							   getObjectDescription(&dep, false),
 							   get_namespace_name(oldNspOid))));
 	}

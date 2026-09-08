@@ -121,7 +121,7 @@ cluster_conn_opts(ClusterInfo *cluster)
  *	message and calls exit() to kill the program.
  */
 PGresult *
-executeQueryOrDie(PGconn *conn, const char *fmt,...)
+executeQueryOrDie(PGconn *conn, const char *fmt, ...)
 {
 	static char query[QUERY_ALLOC];
 	va_list		args;
@@ -186,8 +186,7 @@ start_postmaster(ClusterInfo *cluster, bool report_and_exit_on_error)
 		snprintf(socket_string + strlen(socket_string),
 				 sizeof(socket_string) - strlen(socket_string),
 				 " -c %s='%s'",
-				 (GET_MAJOR_VERSION(cluster->major_version) <= 902) ?
-				 "unix_socket_directory" : "unix_socket_directories",
+				 "unix_socket_directories",
 				 cluster->sockdir);
 #endif
 

@@ -228,11 +228,11 @@ typedef struct ParallelApplyWorkerEntry
 static HTAB *ParallelApplyTxnHash = NULL;
 
 /*
-* A list (pool) of active parallel apply workers. The information for
-* the new worker is added to the list after successfully launching it. The
-* list entry is removed if there are already enough workers in the worker
-* pool at the end of the transaction. For more information about the worker
-* pool, see comments atop this file.
+ * A list (pool) of active parallel apply workers. The information for
+ * the new worker is added to the list after successfully launching it. The
+ * list entry is removed if there are already enough workers in the worker
+ * pool at the end of the transaction. For more information about the worker
+ * pool, see comments atop this file.
  */
 static List *ParallelApplyWorkerPool = NIL;
 
@@ -309,8 +309,9 @@ pa_can_start(void)
 	 * For streaming transactions that are being applied using a parallel
 	 * apply worker, we cannot decide whether to apply the change for a
 	 * relation that is not in the READY state (see
-	 * should_apply_changes_for_rel) as we won't know remote_final_lsn by that
-	 * time. So, we don't start the new parallel apply worker in this case.
+	 * should_apply_changes_for_rel) as we won't know the finish LSN of the
+	 * transaction by that time. So, we don't start the new parallel apply
+	 * worker in this case.
 	 */
 	if (!AllTablesyncsReady())
 		return false;

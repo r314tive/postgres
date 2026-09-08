@@ -50,7 +50,7 @@ $node_subscriber->safe_psql(
 	'postgres',
 	"CREATE SUBSCRIPTION sub_tab
 	 CONNECTION '$publisher_connstr application_name=$appname'
-	 PUBLICATION pub_tab;");
+	 PUBLICATION pub_tab WITH (conflict_log_destination=all)");
 
 # Wait for initial table sync to finish
 $node_subscriber->wait_for_subscription_sync($node_publisher, $appname);
@@ -281,7 +281,7 @@ $node_A->safe_psql('postgres', "INSERT INTO tab VALUES (1, 1), (2, 2);");
 $node_A->wait_for_catchup($subname_BA);
 
 my $result = $node_B->safe_psql('postgres', "SELECT * FROM tab;");
-is($result, qq(1|1
+is( $result, qq(1|1
 2|2), 'check replicated insert on node B');
 
 # Disable the logical replication from node B to node A
@@ -297,9 +297,8 @@ my $log_location = -s $node_B->logfile;
 $node_B->safe_psql('postgres', "UPDATE tab SET b = 3 WHERE a = 1;");
 $node_A->safe_psql('postgres', "DELETE FROM tab WHERE a = 1;");
 
-($cmdret, $stdout, $stderr) = $node_A->psql(
-	'postgres', qq(VACUUM (verbose) public.tab;)
-);
+($cmdret, $stdout, $stderr) =
+  $node_A->psql('postgres', qq(VACUUM (verbose) public.tab;));
 
 like(
 	$stderr,
@@ -319,8 +318,7 @@ like(
 
 $log_location = -s $node_A->logfile;
 
-$node_A->safe_psql(
-	'postgres', "ALTER SUBSCRIPTION $subname_AB ENABLE;");
+$node_A->safe_psql('postgres', "ALTER SUBSCRIPTION $subname_AB ENABLE;");
 $node_B->wait_for_catchup($subname_AB);
 
 $logfile = slurp_file($node_A->logfile(), $log_location);
@@ -367,8 +365,7 @@ $node_A->safe_psql('postgres', "DELETE FROM tab WHERE a = 2;");
 
 $log_location = -s $node_A->logfile;
 
-$node_A->safe_psql(
-	'postgres', "ALTER SUBSCRIPTION $subname_AB ENABLE;");
+$node_A->safe_psql('postgres', "ALTER SUBSCRIPTION $subname_AB ENABLE;");
 $node_B->wait_for_catchup($subname_AB);
 
 $logfile = slurp_file($node_A->logfile(), $log_location);
@@ -406,7 +403,8 @@ ok( $node_A->poll_query_until(
 $node_B->safe_psql('postgres', "ALTER PUBLICATION tap_pub_B ADD TABLE tab");
 
 $node_A->safe_psql('postgres',
-	"ALTER SUBSCRIPTION $subname_AB REFRESH PUBLICATION WITH (copy_data = false)");
+	"ALTER SUBSCRIPTION $subname_AB REFRESH PUBLICATION WITH (copy_data = false)"
+);
 
 ###############################################################################
 # Test that publisher's transactions marked with DELAY_CHKPT_IN_COMMIT prevent
@@ -422,7 +420,8 @@ my $injection_points_supported = $node_B->check_extension('injection_points');
 # commit after marking DELAY_CHKPT_IN_COMMIT flag.
 if ($injection_points_supported != 0)
 {
-	$node_B->append_conf('postgresql.conf',
+	$node_B->append_conf(
+		'postgresql.conf',
 		"shared_preload_libraries = 'injection_points'
 		max_prepared_transactions = 1");
 	$node_B->restart;
@@ -469,11 +468,11 @@ if ($injection_points_supported != 0)
 	);
 
 	# Wait until the backend enters the injection point
-	$node_B->wait_for_event('client backend', 'commit-after-delay-checkpoint');
+	$node_B->wait_for_event('client backend',
+		'commit-after-delay-checkpoint');
 
 	# Confirm the update is suspended
-	$result =
-	  $node_B->safe_psql('postgres', 'SELECT * FROM tab WHERE a = 1');
+	$result = $node_B->safe_psql('postgres', 'SELECT * FROM tab WHERE a = 1');
 	is($result, qq(1|1), 'publisher sees the old row');
 
 	# Delete the row on the subscriber. The deleted row should be retained due to a
@@ -490,14 +489,12 @@ if ($injection_points_supported != 0)
 	# Confirm that the apply worker keeps requesting publisher status, while
 	# awaiting the prepared transaction to commit. Thus, the request log should
 	# appear more than once.
-	$node_A->wait_for_log(
-		qr/sending publisher status request message/,
+	$node_A->wait_for_log(qr/sending publisher status request message/,
 		$log_location);
 
 	$log_location = -s $node_A->logfile;
 
-	$node_A->wait_for_log(
-		qr/sending publisher status request message/,
+	$node_A->wait_for_log(qr/sending publisher status request message/,
 		$log_location);
 
 	# Confirm that the dead tuple cannot be removed
@@ -523,8 +520,7 @@ if ($injection_points_supported != 0)
 	ok($pub_session->quit, "close publisher session");
 
 	# Confirm that the transaction committed
-	$result =
-	  $node_B->safe_psql('postgres', 'SELECT * FROM tab WHERE a = 1');
+	$result = $node_B->safe_psql('postgres', 'SELECT * FROM tab WHERE a = 1');
 	is($result, qq(1|2), 'publisher sees the new row');
 
 	# Ensure the UPDATE is replayed on subscriber
@@ -539,8 +535,7 @@ if ($injection_points_supported != 0)
 		'update target row was deleted in tab');
 
 	# Remember the next transaction ID to be assigned
-	$next_xid =
-	  $node_A->safe_psql('postgres', "SELECT txid_current() + 1;");
+	$next_xid = $node_A->safe_psql('postgres', "SELECT txid_current() + 1;");
 
 	# Confirm that the xmin value is advanced to the latest nextXid after the
 	# prepared transaction on the publisher has been committed.
@@ -583,7 +578,8 @@ $node_B->reload;
 
 # Enable failover to activate the synchronized_standby_slots setting
 $node_A->safe_psql('postgres', "ALTER SUBSCRIPTION $subname_AB DISABLE;");
-$node_A->safe_psql('postgres', "ALTER SUBSCRIPTION $subname_AB SET (failover = true);");
+$node_A->safe_psql('postgres',
+	"ALTER SUBSCRIPTION $subname_AB SET (failover = true);");
 $node_A->safe_psql('postgres', "ALTER SUBSCRIPTION $subname_AB ENABLE;");
 
 # Insert a record
@@ -611,7 +607,8 @@ ok( $node_A->poll_query_until(
 	"the xmin value of slot 'pg_conflict_detection' is invalid on Node A");
 
 $result = $node_A->safe_psql('postgres',
-	"SELECT subretentionactive FROM pg_subscription WHERE subname='$subname_AB';");
+	"SELECT subretentionactive FROM pg_subscription WHERE subname='$subname_AB';"
+);
 is($result, qq(f), 'retention is inactive');
 
 ###############################################################################
@@ -648,16 +645,83 @@ ok( $node_A->poll_query_until(
 	"the xmin value of slot 'pg_conflict_detection' is valid on Node A");
 
 $result = $node_A->safe_psql('postgres',
-	"SELECT subretentionactive FROM pg_subscription WHERE subname='$subname_AB';");
+	"SELECT subretentionactive FROM pg_subscription WHERE subname='$subname_AB';"
+);
 is($result, qq(t), 'retention is active');
+
+###############################################################################
+# Check that the conflict detection slot's xmin is re-initialized when a
+# database newly appears among the databases with retain_dead_tuples
+# subscriptions.
+#
+# The slot's xmin is advanced according to the per-database horizons of the
+# databases seen so far. Without re-initialization, a worker started in a
+# newly retaining database whose oldest active transaction ID is older would
+# be seeded with a value newer than its database's horizon.
+###############################################################################
+
+# Create a second database on node B, with the same table.
+$node_B->safe_psql('postgres', "CREATE DATABASE dbb");
+$node_B->safe_psql('dbb', "CREATE TABLE tab (a int PRIMARY KEY, b int)");
+
+# Hold a transaction with an assigned transaction ID open in dbb, pinning its
+# oldest active transaction ID.
+my $dbb_session = $node_B->background_psql('dbb');
+$dbb_session->query_safe(q{
+	BEGIN;
+	SELECT txid_current();
+});
+
+# Push the transaction ID counter clearly past the pinned transaction ID and
+# wait for the slot's xmin to advance past it. Only the apply worker in the
+# postgres database drives the slot's xmin here, and postgres has no old
+# transaction running.
+$next_xid = $node_B->safe_psql('postgres', "SELECT txid_current() + 1");
+ok( $node_B->poll_query_until(
+		'postgres',
+		"SELECT xmin::text::bigint >= $next_xid FROM pg_replication_slots WHERE slot_name = 'pg_conflict_detection'"
+	),
+	"slot xmin advanced past the transaction ID pinned in dbb");
+
+# Create the second retention subscription in dbb. The launcher must
+# re-initialize the slot's xmin before launching dbb's apply worker.
+my $subname_BA2 = 'tap_sub_b_a2';
+$node_B->safe_psql('dbb',
+	"CREATE SUBSCRIPTION $subname_BA2
+	 CONNECTION '$node_A_connstr application_name=$subname_BA2'
+	 PUBLICATION tap_pub_A
+	 WITH (retain_dead_tuples = true, origin = none)");
+$node_B->wait_for_subscription_sync($node_A, $subname_BA2, 'dbb');
+
+# The slot's xmin must regress to the horizon pinned in dbb.
+ok( $node_B->poll_query_until(
+		'postgres',
+		"SELECT xmin::text::bigint < $next_xid FROM pg_replication_slots WHERE slot_name = 'pg_conflict_detection'"
+	),
+	"slot xmin regressed to the horizon pinned in dbb");
+
+# Once the pinned transaction commits, the xmin must be able to advance
+# again.
+$dbb_session->query_safe("COMMIT;");
+ok($dbb_session->quit, 'close pinned session');
+
+$next_xid = $node_B->safe_psql('postgres', "SELECT txid_current() + 1");
+ok( $node_B->poll_query_until(
+		'postgres',
+		"SELECT xmin::text::bigint >= $next_xid FROM pg_replication_slots WHERE slot_name = 'pg_conflict_detection'"
+	),
+	"slot xmin advances again after the pinned transaction commits");
+
+# Clean up the second database.
+$node_B->safe_psql('dbb', "DROP SUBSCRIPTION $subname_BA2");
+$node_B->safe_psql('postgres', "DROP DATABASE dbb");
 
 ###############################################################################
 # Check that the replication slot pg_conflict_detection is dropped after
 # removing all the subscriptions.
 ###############################################################################
 
-$node_B->safe_psql(
-	'postgres', "DROP SUBSCRIPTION $subname_BA");
+$node_B->safe_psql('postgres', "DROP SUBSCRIPTION $subname_BA");
 
 ok( $node_B->poll_query_until(
 		'postgres',
@@ -665,13 +729,77 @@ ok( $node_B->poll_query_until(
 	),
 	"the slot 'pg_conflict_detection' has been dropped on Node B");
 
-$node_A->safe_psql(
-	'postgres', "DROP SUBSCRIPTION $subname_AB");
+$node_A->safe_psql('postgres', "DROP SUBSCRIPTION $subname_AB");
 
 ok( $node_A->poll_query_until(
 		'postgres',
 		"SELECT count(*) = 0 FROM pg_replication_slots WHERE slot_name = 'pg_conflict_detection'"
 	),
 	"the slot 'pg_conflict_detection' has been dropped on Node A");
+
+###############################################################################
+# A conflict log table is system-managed and cannot be altered directly, so
+# moving it to another tablespace must be rejected.
+###############################################################################
+my $subid = $node_subscriber->safe_psql('postgres',
+	"SELECT oid FROM pg_subscription WHERE subname = 'sub_tab';");
+my $clt = "pg_conflict.pg_conflict_log_$subid";
+
+(undef, undef, $stderr) = $node_subscriber->psql('postgres',
+	"ALTER TABLE $clt SET TABLESPACE pg_default");
+like(
+	$stderr,
+	qr/cannot alter conflict log table "pg_conflict_log_\d+"/,
+	"moving a conflict log table with ALTER TABLE SET TABLESPACE is rejected");
+
+###############################################################################
+# ALTER TABLE ALL IN TABLESPACE must skip conflict log tables, the same way it
+# skips catalog and TOAST tables, instead of failing.  Use an isolated database
+# so the bulk move only touches the objects created here.
+###############################################################################
+$node_subscriber->safe_psql('postgres', "CREATE DATABASE clt_ts_test");
+$node_subscriber->safe_psql('clt_ts_test',
+	"CREATE SUBSCRIPTION sub_ts_test
+	     CONNECTION 'dbname=nonexistent'
+	     PUBLICATION pub
+	     WITH (connect=false, conflict_log_destination='table')");
+
+# A plain user table that should be moved, alongside the CLT that must not be.
+$node_subscriber->safe_psql('clt_ts_test', "CREATE TABLE user_tbl (i int)");
+
+# Create a tablespace backed by a directory inside the data dir.
+my $ts_dir = $node_subscriber->data_dir . '/backup_space';
+mkdir($ts_dir)
+  or die "could not create tablespace directory $ts_dir: $!";
+$node_subscriber->safe_psql('postgres',
+	"CREATE TABLESPACE backup_space LOCATION '$ts_dir'");
+
+# The bulk move succeeds: the user table is relocated while the CLT is skipped.
+$node_subscriber->safe_psql('clt_ts_test',
+	"ALTER TABLE ALL IN TABLESPACE pg_default SET TABLESPACE backup_space");
+
+is( $node_subscriber->safe_psql(
+		'clt_ts_test',
+		"SELECT reltablespace <> 0 FROM pg_class WHERE relname = 'user_tbl'"),
+	't',
+	"ALTER TABLE ALL IN TABLESPACE moves an ordinary user table");
+
+is( $node_subscriber->safe_psql(
+		'clt_ts_test',
+		"SELECT count(*) FROM pg_class c JOIN pg_subscription s
+		   ON c.relname = 'pg_conflict_log_' || s.oid
+		 WHERE s.subname = 'sub_ts_test' AND c.reltablespace <> 0"),
+	'0',
+	"ALTER TABLE ALL IN TABLESPACE skips the conflict log table");
+
+# Cleanup.  The subscription has no real publisher connection, so detach its
+# slot before dropping it.
+$node_subscriber->safe_psql('clt_ts_test',
+	"ALTER SUBSCRIPTION sub_ts_test DISABLE");
+$node_subscriber->safe_psql('clt_ts_test',
+	"ALTER SUBSCRIPTION sub_ts_test SET (slot_name = NONE)");
+$node_subscriber->safe_psql('clt_ts_test', "DROP SUBSCRIPTION sub_ts_test");
+$node_subscriber->safe_psql('postgres', "DROP DATABASE clt_ts_test");
+$node_subscriber->safe_psql('postgres', "DROP TABLESPACE backup_space");
 
 done_testing();

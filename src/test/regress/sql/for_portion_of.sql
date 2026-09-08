@@ -590,11 +590,19 @@ SELECT * FROM for_portion_of_test ORDER BY id, valid_at;
 
 -- UPDATE ... RETURNING returns only the updated values
 -- (not the inserted side values, which are added by a separate "statement"):
+CREATE FUNCTION fpo_returning_row(text)
+RETURNS text LANGUAGE plpgsql AS
+$$
+BEGIN
+  RAISE NOTICE 'RETURNING %', $1;
+  RETURN $1;
+END;
+$$;
 UPDATE for_portion_of_test
   FOR PORTION OF valid_at FROM '2018-02-01' TO '2018-02-15'
   SET name = 'three^3'
   WHERE id = '[3,4)'
-  RETURNING *;
+  RETURNING *, fpo_returning_row(for_portion_of_test::text);
 
 -- UPDATE ... RETURNING supports NEW and OLD valid_at
 UPDATE for_portion_of_test
@@ -629,7 +637,7 @@ DELETE FROM for_portion_of_test WHERE id = '[99,100)';
 DELETE FROM for_portion_of_test
   FOR PORTION OF valid_at FROM '2018-02-02' TO '2018-02-03'
   WHERE id = '[3,4)'
-  RETURNING *;
+  RETURNING *, fpo_returning_row(for_portion_of_test::text);
 
 -- DELETE FOR PORTION OF in a PL/pgSQL function
 INSERT INTO for_portion_of_test (id, valid_at, name) VALUES
@@ -913,6 +921,10 @@ CREATE TRIGGER fpo_before_stmt
   BEFORE INSERT OR UPDATE OR DELETE ON for_portion_of_test
   FOR EACH STATEMENT EXECUTE PROCEDURE dump_trigger(false, false);
 
+CREATE TRIGGER fpo_before_stmt1
+  BEFORE UPDATE OF valid_at ON for_portion_of_test
+  FOR EACH STATEMENT EXECUTE PROCEDURE dump_trigger(false, false);
+
 CREATE TRIGGER fpo_after_insert_stmt
   AFTER INSERT ON for_portion_of_test
   FOR EACH STATEMENT EXECUTE PROCEDURE dump_trigger(false, false);
@@ -929,6 +941,10 @@ CREATE TRIGGER fpo_after_delete_stmt
 
 CREATE TRIGGER fpo_before_row
   BEFORE INSERT OR UPDATE OR DELETE ON for_portion_of_test
+  FOR EACH ROW EXECUTE PROCEDURE dump_trigger(false, false);
+
+CREATE TRIGGER fpo_before_row1
+  BEFORE UPDATE OF valid_at ON for_portion_of_test
   FOR EACH ROW EXECUTE PROCEDURE dump_trigger(false, false);
 
 CREATE TRIGGER fpo_after_insert_row
@@ -1169,6 +1185,91 @@ SELECT * FROM for_portion_of_test WHERE id = '[4,5)' ORDER BY id, valid_at;
 
 DROP TRIGGER fpo_after_delete_row ON for_portion_of_test;
 
+-- Test that a tuple-modifying BEFORE INSERT ROW trigger acts
+-- consistently on both temporal leftovers.
+-- When FOR PORTION OF splits a row into two leftovers, both triggers
+-- should get the original row's values.
+
+DROP TABLE for_portion_of_test;
+CREATE TABLE for_portion_of_test (
+  id int,
+  valid_at daterange,
+  name text
+);
+
+CREATE FUNCTION fpo_append_name_suffix()
+RETURNS TRIGGER LANGUAGE plpgsql AS
+$$
+BEGIN
+  NEW.name := NEW.name || '+insert';
+  RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER fpo_before_insert_row
+  BEFORE INSERT ON for_portion_of_test
+  FOR EACH ROW EXECUTE PROCEDURE fpo_append_name_suffix();
+
+INSERT INTO for_portion_of_test VALUES (1, '[2020-01-01,2020-12-31)', 'foo');
+
+UPDATE for_portion_of_test
+  FOR PORTION OF valid_at FROM '2020-04-01' TO '2020-08-01'
+  SET name = 'bar'
+  WHERE id = 1;
+
+-- Both leftovers should have the same name: 'foo+insert+insert'.
+SELECT * FROM for_portion_of_test ORDER BY valid_at;
+
+DROP FUNCTION fpo_append_name_suffix CASCADE;
+DROP TABLE for_portion_of_test;
+
+-- A BEFORE UPDATE trigger that changes the application-time column is allowed,
+-- even if the results are senseless.
+-- Note this is likely to cause a primary key violation.
+
+CREATE TABLE for_portion_of_test (
+  id int4range,
+  valid_at daterange,
+  name text
+);
+
+CREATE FUNCTION trg_fpo_change_valid_at()
+RETURNS TRIGGER LANGUAGE plpgsql AS
+$$
+BEGIN
+  NEW.valid_at = daterange('2018-01-01', '2019-01-01');
+  RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER fpo_before_update_row
+  BEFORE UPDATE ON for_portion_of_test
+  FOR EACH ROW EXECUTE PROCEDURE trg_fpo_change_valid_at();
+
+INSERT INTO for_portion_of_test VALUES ('[1,2)', '[2010-01-01,2020-01-01)', 'foo');
+
+UPDATE for_portion_of_test
+  FOR PORTION OF valid_at FROM '2018-05-01' TO '2018-06-01'
+  SET name = CONCAT(name, '!')
+  WHERE id = '[1,2)';
+
+SELECT * FROM for_portion_of_test ORDER BY id, valid_at;
+
+-- A primary key should reject anything invalid:
+TRUNCATE for_portion_of_test;
+ALTER TABLE for_portion_of_test
+  ADD CONSTRAINT for_portion_of_test_key
+  PRIMARY KEY (id, valid_at WITHOUT OVERLAPS);
+INSERT INTO for_portion_of_test VALUES ('[1,2)', '[2010-01-01,2020-01-01)', 'foo');
+UPDATE for_portion_of_test
+  FOR PORTION OF valid_at FROM '2018-05-01' TO '2018-06-01'
+  SET name = CONCAT(name, '!')
+  WHERE id = '[1,2)';
+
+DROP TRIGGER fpo_before_update_row ON for_portion_of_test;
+DROP FUNCTION trg_fpo_change_valid_at();
+DROP TABLE for_portion_of_test;
+
 -- Test with multiranges
 
 CREATE TABLE for_portion_of_test2 (
@@ -1292,6 +1393,7 @@ DROP TABLE for_portion_of_test2;
 DROP TYPE mydaterange;
 
 -- Test FOR PORTION OF against a partitioned table.
+-- Include a stored generated column to test updatedCols column mapping.
 -- temporal_partitioned_1 has the same attnums as the root
 -- temporal_partitioned_3 has the different attnums from the root
 -- temporal_partitioned_5 has the different attnums too, but reversed
@@ -1300,6 +1402,7 @@ CREATE TABLE temporal_partitioned (
   id int4range,
   valid_at daterange,
   name text,
+  range_len int GENERATED ALWAYS AS (upper(valid_at) - lower(valid_at)) STORED,
   CONSTRAINT temporal_paritioned_uq UNIQUE (id, valid_at WITHOUT OVERLAPS)
 ) PARTITION BY LIST (id);
 CREATE TABLE temporal_partitioned_1 PARTITION OF temporal_partitioned FOR VALUES IN ('[1,2)', '[2,3)');
@@ -1307,13 +1410,15 @@ CREATE TABLE temporal_partitioned_3 PARTITION OF temporal_partitioned FOR VALUES
 CREATE TABLE temporal_partitioned_5 PARTITION OF temporal_partitioned FOR VALUES IN ('[5,6)', '[6,7)');
 
 ALTER TABLE temporal_partitioned DETACH PARTITION temporal_partitioned_3;
-ALTER TABLE temporal_partitioned_3 DROP COLUMN id, DROP COLUMN valid_at;
+ALTER TABLE temporal_partitioned_3 DROP COLUMN id, DROP COLUMN valid_at CASCADE;
 ALTER TABLE temporal_partitioned_3 ADD COLUMN id int4range NOT NULL, ADD COLUMN valid_at daterange NOT NULL;
+ALTER TABLE temporal_partitioned_3 ADD COLUMN range_len int GENERATED ALWAYS AS (upper(valid_at) - lower(valid_at)) STORED;
 ALTER TABLE temporal_partitioned ATTACH PARTITION temporal_partitioned_3 FOR VALUES IN ('[3,4)', '[4,5)');
 
 ALTER TABLE temporal_partitioned DETACH PARTITION temporal_partitioned_5;
-ALTER TABLE temporal_partitioned_5 DROP COLUMN id, DROP COLUMN valid_at;
+ALTER TABLE temporal_partitioned_5 DROP COLUMN id, DROP COLUMN valid_at CASCADE;
 ALTER TABLE temporal_partitioned_5 ADD COLUMN valid_at daterange NOT NULL, ADD COLUMN id int4range NOT NULL;
+ALTER TABLE temporal_partitioned_5 ADD COLUMN range_len int GENERATED ALWAYS AS (upper(valid_at) - lower(valid_at)) STORED;
 ALTER TABLE temporal_partitioned ATTACH PARTITION temporal_partitioned_5 FOR VALUES IN ('[5,6)', '[6,7)');
 
 INSERT INTO temporal_partitioned (id, valid_at, name) VALUES
@@ -1342,7 +1447,8 @@ UPDATE temporal_partitioned FOR PORTION OF valid_at FROM '2000-03-01' TO '2000-0
 UPDATE temporal_partitioned FOR PORTION OF valid_at FROM '2000-06-01' TO '2000-07-01'
   SET name = 'one^2',
       id = '[4,5)'
-  WHERE id = '[1,2)';
+  WHERE id = '[1,2)'
+  RETURNING id, valid_at, name, fpo_returning_row(temporal_partitioned::text);
 
 -- Move from partition 3 to partition 1
 UPDATE temporal_partitioned FOR PORTION OF valid_at FROM '2000-06-01' TO '2000-07-01'
@@ -1358,12 +1464,55 @@ UPDATE temporal_partitioned FOR PORTION OF valid_at FROM '2000-06-01' TO '2000-0
 
 -- Update all partitions at once (each with leftovers)
 
-SELECT * FROM temporal_partitioned ORDER BY id, valid_at;
+SELECT *, upper(valid_at) - lower(valid_at) FROM temporal_partitioned ORDER BY id, valid_at;
 SELECT * FROM temporal_partitioned_1 ORDER BY id, valid_at;
 SELECT * FROM temporal_partitioned_3 ORDER BY id, valid_at;
 SELECT * FROM temporal_partitioned_5 ORDER BY id, valid_at;
 
+DROP FUNCTION fpo_returning_row;
 DROP TABLE temporal_partitioned;
+
+-- Test FOR PORTION OF when the partition key depends on the range column.
+-- Then a leftover can belong to a partition that is not one of the plan's
+-- result relations, and we must build a new ResultRelInfo for it.
+
+CREATE TABLE temporal_partitioned_by_valid_at (
+  id int4range,
+  valid_at daterange,
+  name text
+) PARTITION BY RANGE (lower(valid_at));
+CREATE TABLE temporal_partitioned_early
+  PARTITION OF temporal_partitioned_by_valid_at
+  FOR VALUES FROM (MINVALUE) TO ('2000-06-01');
+CREATE TABLE temporal_partitioned_late
+  PARTITION OF temporal_partitioned_by_valid_at
+  FOR VALUES FROM ('2000-06-01') TO (MAXVALUE);
+
+INSERT INTO temporal_partitioned_by_valid_at (id, valid_at, name) VALUES
+  ('[1,2)', daterange('2000-01-01', '2010-01-01'), 'one');
+
+-- The WHERE clause prunes away the late partition, but the second leftover
+-- belongs there.  The leftovers must not appear in the RETURNING output.
+DELETE FROM temporal_partitioned_by_valid_at
+  FOR PORTION OF valid_at FROM '2000-03-01' TO '2000-07-01'
+  WHERE lower(valid_at) < '2000-06-01'
+  RETURNING id, valid_at, name;
+SELECT tableoid::regclass, * FROM temporal_partitioned_by_valid_at
+  ORDER BY id, valid_at;
+
+-- The same thing for UPDATE
+DELETE FROM temporal_partitioned_by_valid_at;
+INSERT INTO temporal_partitioned_by_valid_at (id, valid_at, name) VALUES
+  ('[1,2)', daterange('2000-01-01', '2010-01-01'), 'one');
+UPDATE temporal_partitioned_by_valid_at
+  FOR PORTION OF valid_at FROM '2000-03-01' TO '2000-07-01'
+  SET name = 'one^1'
+  WHERE lower(valid_at) < '2000-06-01'
+  RETURNING id, valid_at, name;
+SELECT tableoid::regclass, * FROM temporal_partitioned_by_valid_at
+  ORDER BY id, valid_at;
+
+DROP TABLE temporal_partitioned_by_valid_at;
 
 -- UPDATE/DELETE FOR PORTION OF with RULEs
 CREATE TABLE fpo_rule (f1 bigint, f2 int4range);
@@ -1397,5 +1546,422 @@ UPDATE fpo_rule FOR PORTION OF f2 FROM 9 TO 10 SET f1 = 3;
 SELECT * FROM fpo_rule ORDER BY f1;
 
 DROP TABLE fpo_rule;
+
+-- Deparsing FOR PORTION OF must use the range column's current name,
+-- not the name it had when the rule was created.
+CREATE TABLE fpo_rename (f1 bigint, f2 int4range);
+CREATE TABLE fpo_rename_src (x int);
+CREATE RULE fpo_rename_rule1 AS ON UPDATE TO fpo_rename_src
+  DO INSTEAD UPDATE fpo_rename FOR PORTION OF f2 FROM 3 TO 6 SET f1 = 2;
+CREATE RULE fpo_rename_rule2 AS ON DELETE TO fpo_rename_src
+  DO INSTEAD DELETE FROM fpo_rename FOR PORTION OF f2 (int4range(3, 6));
+
+\d+ fpo_rename_src
+ALTER TABLE fpo_rename RENAME COLUMN f1 TO ff1;
+ALTER TABLE fpo_rename RENAME COLUMN f2 TO ff2;
+\d+ fpo_rename_src
+
+DROP TABLE fpo_rename, fpo_rename_src;
+
+-- UPDATE/DELETE FOR PORTION OF on a GENERATED VIRTUAL range column:
+CREATE TABLE fpo_gen_virtual (
+  a int,
+  b int4range GENERATED ALWAYS AS (int4range(a, a + 1)) VIRTUAL
+);
+INSERT INTO fpo_gen_virtual VALUES (1);
+DELETE FROM fpo_gen_virtual FOR PORTION OF b FROM 1 TO 2; -- fails
+UPDATE fpo_gen_virtual FOR PORTION OF b FROM 1 TO 2 SET a = 5; -- fails
+DROP TABLE fpo_gen_virtual;
+
+-- UPDATE/DELETE FOR PORTION OF on a GENERATED STORED range column:
+CREATE TABLE fpo_gen_stored (
+  a int,
+  b int4range GENERATED ALWAYS AS (int4range(a, a + 1)) STORED
+);
+INSERT INTO fpo_gen_stored VALUES (1);
+DELETE FROM fpo_gen_stored FOR PORTION OF b FROM 1 TO 2; -- fails
+UPDATE fpo_gen_stored FOR PORTION OF b FROM 1 TO 2 SET a = 5; -- fails
+DROP TABLE fpo_gen_stored;
+
+-- FOR PORTION OF a generated column reached through an updatable view.
+-- The view hides that b is generated during parse analysis, so the check
+-- must happen later (in the planner), after the view is rewritten to its
+-- underlying table.
+CREATE TABLE fpo_gen_view (
+  a int,
+  b int4range GENERATED ALWAYS AS (int4range(a, a + 1)) STORED
+);
+INSERT INTO fpo_gen_view VALUES (1);
+CREATE VIEW fpo_gen_view_v AS SELECT * FROM fpo_gen_view;
+DELETE FROM fpo_gen_view_v FOR PORTION OF b FROM 1 TO 2; -- fails
+UPDATE fpo_gen_view_v FOR PORTION OF b FROM 1 TO 2 SET a = 5; -- fails
+DROP VIEW fpo_gen_view_v;
+DROP TABLE fpo_gen_view;
+
+-- A new-style SQL function is parsed at CREATE FUNCTION time, but our
+-- generated-column check is in the planner, so it sees the column's
+-- current attgenerated when the function's plan is built at run time.
+CREATE TABLE fpo_func_test (
+  a int,
+  b int4range GENERATED ALWAYS AS (int4range(a, a + 1)) STORED
+);
+INSERT INTO fpo_func_test VALUES (1);
+-- Definition succeeds even though b is a generated column today.
+CREATE FUNCTION fpo_delete() RETURNS void
+  LANGUAGE SQL
+  BEGIN ATOMIC
+    DELETE FROM fpo_func_test FOR PORTION OF b FROM 1 TO 2;
+  END;
+SELECT fpo_delete(); -- fails: b is generated
+-- Drop the generation expression and the same function now succeeds.
+ALTER TABLE fpo_func_test ALTER COLUMN b DROP EXPRESSION;
+SELECT fpo_delete();
+TABLE fpo_func_test ORDER BY a, b;
+DROP FUNCTION fpo_delete();
+DROP TABLE fpo_func_test;
+
+-- UPDATE/DELETE FOR PORTION OF with table inheritance
+-- Leftover rows must stay in the child table, preserving child-specific columns.
+CREATE TABLE fpo_inh_parent (
+  id int4range,
+  valid_at daterange,
+  name text
+);
+CREATE TABLE fpo_inh_child (
+  description text
+) INHERITS (fpo_inh_parent);
+
+-- Update targets the parent; the matching row lives in the child.
+INSERT INTO fpo_inh_child (id, valid_at, name, description) VALUES
+  ('[1,2)', '[2018-01-01,2019-01-01)', 'one', 'initial');
+UPDATE fpo_inh_parent FOR PORTION OF valid_at FROM '2018-04-01' TO '2018-10-01'
+  SET name = 'one^1';
+-- All three rows should be in the child, with description preserved.
+SELECT tableoid::regclass, * FROM fpo_inh_parent ORDER BY valid_at;
+SELECT * FROM fpo_inh_child ORDER BY valid_at;
+-- No rows should have leaked into the parent.
+SELECT * FROM ONLY fpo_inh_parent ORDER BY valid_at;
+
+-- Same test for DELETE instead of UPDATE:
+TRUNCATE fpo_inh_child, fpo_inh_parent;
+INSERT INTO fpo_inh_child (id, valid_at, name, description) VALUES
+  ('[1,2)', '[2018-01-01,2019-01-01)', 'one', 'initial');
+DELETE FROM fpo_inh_parent FOR PORTION OF valid_at FROM '2018-04-01' TO '2018-10-01';
+-- Both rows should be in the child, with description preserved.
+SELECT tableoid::regclass, * FROM fpo_inh_parent ORDER BY valid_at;
+SELECT * FROM fpo_inh_child ORDER BY valid_at;
+-- No rows should have leaked into the parent.
+SELECT * FROM ONLY fpo_inh_parent ORDER BY valid_at;
+
+DROP TABLE fpo_inh_parent CASCADE;
+
+-- UPDATE FOR PORTION OF with multiple inheritance
+-- Leftover rows must stay in the child table, even if the range column's
+-- attnum differs between the target parent and child.
+CREATE TABLE temporal_parent (
+  id int,
+  valid_at daterange,
+  name text
+);
+CREATE TABLE other_parent (
+  prefix text,
+  note text
+);
+CREATE TABLE mi_child () INHERITS (other_parent, temporal_parent);
+
+-- attnum of the range column is different in temporal_parent and mi_child
+SELECT attnum, attname
+  FROM pg_attribute
+  WHERE attrelid = 'temporal_parent'::regclass
+    AND attnum > 0 AND NOT attisdropped
+  ORDER BY attnum;
+SELECT attnum, attname
+  FROM pg_attribute
+  WHERE attrelid = 'mi_child'::regclass
+    AND attnum > 0 AND NOT attisdropped
+  ORDER BY attnum;
+
+INSERT INTO mi_child (prefix, note, id, valid_at, name) VALUES
+  ('pfx', 'memo', 1, daterange('2000-01-01', '2010-01-01'), 'old');
+
+UPDATE temporal_parent FOR PORTION OF valid_at FROM '2001-01-01' TO '2002-01-01'
+  SET name = 'new'
+  WHERE id = 1;
+
+SELECT tableoid::regclass, * FROM temporal_parent ORDER BY valid_at;
+SELECT * FROM mi_child ORDER BY valid_at;
+SELECT * FROM ONLY temporal_parent ORDER BY valid_at;
+
+TRUNCATE mi_child, other_parent, temporal_parent;
+INSERT INTO mi_child (prefix, note, id, valid_at, name) VALUES
+  ('pfx', 'memo', 1, daterange('2000-01-01', '2010-01-01'), 'old');
+
+DELETE FROM temporal_parent FOR PORTION OF valid_at FROM '2001-01-01' TO '2002-01-01'
+  WHERE id = 1;
+
+SELECT tableoid::regclass, * FROM temporal_parent ORDER BY valid_at;
+SELECT * FROM mi_child ORDER BY valid_at;
+SELECT * FROM ONLY temporal_parent ORDER BY valid_at;
+
+DROP TABLE temporal_parent CASCADE;
+
+-- UPDATE FOR PORTION OF with generated columns
+-- The generated column depends on the range column, so it must be
+-- recomputed when FOR PORTION OF narrows the range.
+CREATE TABLE fpo_generated (
+  id int,
+  valid_at int4range,
+  range_len int GENERATED ALWAYS AS (upper(valid_at) - lower(valid_at)) STORED,
+  range_lenv int GENERATED ALWAYS AS (upper(valid_at) - lower(valid_at))
+);
+INSERT INTO fpo_generated (id, valid_at) VALUES (1, '[10,100)');
+
+SELECT * FROM fpo_generated ORDER BY valid_at;
+
+-- After the FOR PORTION OF (FPO) update, all three resulting rows
+-- (leftover-before, updated, and leftover-after) must contain the correct
+-- values for range_len and range_lenv.
+UPDATE fpo_generated
+  FOR PORTION OF valid_at FROM 30 TO 70
+  SET id = 2;
+
+SELECT * FROM fpo_generated ORDER BY valid_at;
+
+-- Also test with a generated column that references both a SET column
+-- and the range column.
+DROP TABLE fpo_generated;
+CREATE TABLE fpo_generated (
+  id int,
+  valid_at int4range,
+  id_plus_len int GENERATED ALWAYS AS (id + upper(valid_at) - lower(valid_at)) STORED,
+  id_plus_lenv int GENERATED ALWAYS AS (id + upper(valid_at) - lower(valid_at))
+);
+
+INSERT INTO fpo_generated (id, valid_at) VALUES (1, '[10,100)');
+SELECT * FROM fpo_generated ORDER BY valid_at;
+
+UPDATE fpo_generated
+  FOR PORTION OF valid_at FROM 30 TO 70
+  SET id = 2;
+SELECT * FROM fpo_generated ORDER BY valid_at;
+DROP TABLE fpo_generated;
+
+-- Test that UPDATE OF colname triggers fire if colname is valid_at:
+CREATE TABLE fpo_update_of_trigger (
+  id int,
+  valid_at int4range
+);
+INSERT INTO fpo_update_of_trigger (id, valid_at) VALUES (1, '[10,100)');
+CREATE TRIGGER fpo_before_row1
+  BEFORE UPDATE OF valid_at ON fpo_update_of_trigger
+  FOR EACH ROW EXECUTE PROCEDURE dump_trigger(false, false);
+CREATE TRIGGER fpo_before_row2
+  BEFORE UPDATE OF valid_at ON fpo_update_of_trigger
+  FOR EACH STATEMENT EXECUTE PROCEDURE dump_trigger(false, false);
+UPDATE fpo_update_of_trigger
+  FOR PORTION OF valid_at FROM 30 TO 70
+  SET id = 2;
+DROP TABLE fpo_update_of_trigger;
+
+-- CURSORs
+CREATE TABLE fpo_cursed (
+  id int,
+  valid_at int4range
+);
+INSERT INTO fpo_cursed (id, valid_at) VALUES (1, '[10,100)');
+
+-- UPDATE FOR PORTION OF is not permitted with a CURSOR:
+BEGIN;
+DECLARE fpo_cur CURSOR FOR SELECT * FROM fpo_cursed;
+FETCH NEXT FROM fpo_cur;
+UPDATE fpo_cursed
+  FOR PORTION OF valid_at FROM 5 TO 6
+  SET id = 2
+  WHERE CURRENT OF fpo_cur;
+ROLLBACK;
+
+-- DELETE FOR PORTION OF is not permitted with a CURSOR:
+BEGIN;
+DECLARE fpo_cur CURSOR FOR SELECT * FROM fpo_cursed;
+FETCH NEXT FROM fpo_cur;
+DELETE FROM fpo_cursed
+  FOR PORTION OF valid_at FROM 8 TO 9
+  WHERE CURRENT OF fpo_cur;
+ROLLBACK;
+SELECT * FROM fpo_cursed;
+DROP TABLE fpo_cursed;
+
+-- UPDATE/DELETE FOR PORTION OF leftover rows must satisfy RLS INSERT checks.
+CREATE ROLE regress_fpo_rls;
+CREATE TABLE fpo_rls (
+  id int,
+  valid_at int4range
+);
+ALTER TABLE fpo_rls ENABLE ROW LEVEL SECURITY;
+CREATE POLICY fpo_rls_select ON fpo_rls
+  FOR SELECT TO regress_fpo_rls
+  USING (true);
+CREATE POLICY fpo_rls_update ON fpo_rls
+  FOR UPDATE TO regress_fpo_rls
+  USING (lower(valid_at) < 50)
+  WITH CHECK (lower(valid_at) < 50);
+CREATE POLICY fpo_rls_delete ON fpo_rls
+  FOR DELETE TO regress_fpo_rls
+  USING (lower(valid_at) < 50);
+CREATE POLICY fpo_rls_insert ON fpo_rls
+  FOR INSERT TO regress_fpo_rls
+  WITH CHECK (lower(valid_at) < 50);
+GRANT SELECT, UPDATE, DELETE ON fpo_rls TO regress_fpo_rls;
+
+INSERT INTO fpo_rls VALUES (1, '[10,100)');
+SET ROLE regress_fpo_rls;
+UPDATE fpo_rls
+  FOR PORTION OF valid_at FROM 30 TO 100
+  SET id = 2;
+RESET ROLE;
+SELECT * FROM fpo_rls ORDER BY valid_at;
+
+TRUNCATE fpo_rls;
+INSERT INTO fpo_rls VALUES (1, '[10,100)');
+SET ROLE regress_fpo_rls;
+DELETE FROM fpo_rls
+  FOR PORTION OF valid_at FROM 30 TO 100;
+RESET ROLE;
+SELECT * FROM fpo_rls ORDER BY valid_at;
+
+TRUNCATE fpo_rls;
+INSERT INTO fpo_rls VALUES (1, '[10,100)');
+SET ROLE regress_fpo_rls;
+UPDATE fpo_rls
+  FOR PORTION OF valid_at FROM 30 TO 70
+  SET id = 2;
+RESET ROLE;
+SELECT * FROM fpo_rls ORDER BY valid_at;
+
+TRUNCATE fpo_rls;
+INSERT INTO fpo_rls VALUES (1, '[10,100)');
+SET ROLE regress_fpo_rls;
+DELETE FROM fpo_rls
+  FOR PORTION OF valid_at FROM 30 TO 70;
+RESET ROLE;
+SELECT * FROM fpo_rls ORDER BY valid_at;
+
+DROP TABLE fpo_rls;
+DROP ROLE regress_fpo_rls;
+
+--
+-- Parameters in the FOR PORTION OF bounds
+--
+
+CREATE TABLE fpo_param (
+  id int4range,
+  valid_at daterange,
+  name text
+);
+INSERT INTO fpo_param (id, valid_at, name) VALUES
+  ('[1,2)', daterange('2000-01-01', '2010-01-01'), 'one');
+
+-- A parameter of unspecified type in an ordinary expression gets its type
+-- resolved from context.  This is the control case for the FROM/TO bounds
+-- below: it builds exactly the same daterange the FROM/TO form does.
+PREPARE fpo_param_control AS
+  UPDATE fpo_param SET name = 'ctl' WHERE valid_at && daterange($1, $2);
+SELECT parameter_types FROM pg_prepared_statements
+  WHERE name = 'fpo_param_control';
+
+-- The (portion) form resolves the parameter type from the range column.
+PREPARE fpo_param_portion AS
+  UPDATE fpo_param FOR PORTION OF valid_at ($1) SET name = 'portion';
+SELECT parameter_types FROM pg_prepared_statements
+  WHERE name = 'fpo_param_portion';
+
+-- The FROM/TO form should likewise resolve its bounds to the range's
+-- subtype, so that clients need not spell out the parameter types.
+PREPARE fpo_param_update AS
+  UPDATE fpo_param FOR PORTION OF valid_at FROM $1 TO $2 SET name = 'upd';
+SELECT parameter_types FROM pg_prepared_statements
+  WHERE name = 'fpo_param_update';
+
+PREPARE fpo_param_delete AS
+  DELETE FROM fpo_param FOR PORTION OF valid_at FROM $1 TO $2;
+SELECT parameter_types FROM pg_prepared_statements
+  WHERE name = 'fpo_param_delete';
+
+-- Only one bound parameterized.
+PREPARE fpo_param_one AS
+  UPDATE fpo_param FOR PORTION OF valid_at FROM $1 TO '2003-01-01'
+    SET name = 'one-bound';
+SELECT parameter_types FROM pg_prepared_statements
+  WHERE name = 'fpo_param_one';
+
+-- A parameter used as both bounds must still resolve to one type.
+PREPARE fpo_param_same AS
+  UPDATE fpo_param FOR PORTION OF valid_at FROM $1 TO $1 SET name = 'same';
+SELECT parameter_types FROM pg_prepared_statements
+  WHERE name = 'fpo_param_same';
+
+EXECUTE fpo_param_update('2002-01-01', '2003-01-01');
+SELECT * FROM fpo_param ORDER BY valid_at;
+
+DEALLOCATE fpo_param_control;
+DEALLOCATE fpo_param_portion;
+DEALLOCATE fpo_param_update;
+DEALLOCATE fpo_param_delete;
+DEALLOCATE fpo_param_one;
+DEALLOCATE fpo_param_same;
+
+-- The bounds we keep for deparsing are the coerced ones, so an untyped NULL
+-- bound renders with the range's subtype instead of "unknown".
+CREATE TABLE fpo_param_src (id int);
+CREATE RULE fpo_param_r AS ON DELETE TO fpo_param_src DO INSTEAD
+  DELETE FROM fpo_param FOR PORTION OF valid_at FROM NULL TO '2001-01-01';
+SELECT definition FROM pg_rules WHERE rulename = 'fpo_param_r';
+
+DROP TABLE fpo_param_src;
+DROP TABLE fpo_param;
+
+--
+-- EXPLAIN without ANALYZE must only plan the statement, so it must not
+-- evaluate the FOR PORTION OF target.
+--
+
+CREATE TABLE fpo_explain (
+  id int4range,
+  valid_at daterange,
+  name text
+);
+INSERT INTO fpo_explain (id, valid_at, name) VALUES
+  ('[1,2)', daterange('2000-01-01', '2010-01-01'), 'one');
+
+-- GENERIC_PLAN exists precisely so that a statement containing parameter
+-- placeholders can be planned without supplying any parameter values.  The
+-- hand-written equivalent qual is the control case.
+EXPLAIN (COSTS OFF, GENERIC_PLAN)
+  UPDATE fpo_explain SET name = 'q' WHERE valid_at && $1::daterange;
+EXPLAIN (COSTS OFF, GENERIC_PLAN)
+  UPDATE fpo_explain FOR PORTION OF valid_at ($1::daterange) SET name = 'q';
+EXPLAIN (COSTS OFF, GENERIC_PLAN)
+  DELETE FROM fpo_explain FOR PORTION OF valid_at ($1::daterange);
+
+-- A null target is a run-time error, so plain EXPLAIN should still report
+-- the plan.
+EXPLAIN (COSTS OFF)
+  UPDATE fpo_explain FOR PORTION OF valid_at (NULL::daterange) SET name = 'q';
+EXPLAIN (COSTS OFF)
+  DELETE FROM fpo_explain FOR PORTION OF valid_at (NULL::daterange);
+
+-- Actually running it is still an error.
+UPDATE fpo_explain FOR PORTION OF valid_at (NULL::daterange) SET name = 'q';
+DELETE FROM fpo_explain FOR PORTION OF valid_at (NULL::daterange);
+
+-- EXPLAIN ANALYZE does execute, so the null check must still fire there.
+EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+  UPDATE fpo_explain FOR PORTION OF valid_at (NULL::daterange) SET name = 'q';
+
+UPDATE fpo_explain FOR PORTION OF valid_at FROM '2002-01-01' TO '2003-01-01'
+  SET name = 'q';
+SELECT * FROM fpo_explain ORDER BY valid_at;
+
+DROP TABLE fpo_explain;
 
 RESET datestyle;

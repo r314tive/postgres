@@ -154,14 +154,6 @@
 static ResourceOwner SavedResourceOwnerDuringExport = NULL;
 static bool ExportInProgress = false;
 
-/*
- * If a backend is going to do logical decoding and the output plugin does
- * not need to access shared catalogs, setting this variable to false can make
- * the decoding startup faster. In particular, the backend will not need to
- * wait for completion of already running transactions in other databases.
- */
-bool		accessSharedCatalogsInDecoding = true;
-
 /* ->committed and ->catchange manipulation */
 static void SnapBuildPurgeOlderTxn(SnapBuild *builder);
 
@@ -235,9 +227,6 @@ AllocateSnapshotBuilder(ReorderBuffer *reorder,
 
 	MemoryContextSwitchTo(oldcontext);
 
-	/* The default is that shared catalog are used. */
-	accessSharedCatalogsInDecoding = true;
-
 	return builder;
 }
 
@@ -255,9 +244,6 @@ FreeSnapshotBuilder(SnapBuild *builder)
 		SnapBuildSnapDecRefcount(builder->snapshot);
 		builder->snapshot = NULL;
 	}
-
-	/* The default is that shared catalog are used. */
-	accessSharedCatalogsInDecoding = true;
 
 	/* other resources are deallocated via memory context reset */
 	MemoryContextDelete(context);
@@ -880,7 +866,6 @@ SnapBuildAddCommittedTxn(SnapBuild *builder, TransactionId xid)
 static void
 SnapBuildPurgeOlderTxn(SnapBuild *builder)
 {
-	int			off;
 	TransactionId *workspace;
 	int			surviving_xids = 0;
 
@@ -894,7 +879,7 @@ SnapBuildPurgeOlderTxn(SnapBuild *builder)
 						   builder->committed.xcnt * sizeof(TransactionId));
 
 	/* copy xids that still are interesting to workspace */
-	for (off = 0; off < builder->committed.xcnt; off++)
+	for (size_t off = 0; off < builder->committed.xcnt; off++)
 	{
 		if (NormalTransactionIdPrecedes(builder->committed.xip[off],
 										builder->xmin))
@@ -920,6 +905,8 @@ SnapBuildPurgeOlderTxn(SnapBuild *builder)
 	 */
 	if (builder->catchange.xcnt > 0)
 	{
+		size_t		off;
+
 		/*
 		 * Since catchange.xip is sorted, we find the lower bound of xids that
 		 * are still interesting.
@@ -1151,8 +1138,7 @@ SnapBuildXidHasCatalogChanges(SnapBuild *builder, TransactionId xid,
  * anymore.
  */
 void
-SnapBuildProcessRunningXacts(SnapBuild *builder, XLogRecPtr lsn, xl_running_xacts *running,
-							 bool db_specific)
+SnapBuildProcessRunningXacts(SnapBuild *builder, XLogRecPtr lsn, xl_running_xacts *running)
 {
 	ReorderBufferTXN *txn;
 	TransactionId xmin;
@@ -1164,49 +1150,12 @@ SnapBuildProcessRunningXacts(SnapBuild *builder, XLogRecPtr lsn, xl_running_xact
 	 */
 	if (builder->state < SNAPBUILD_CONSISTENT)
 	{
-		/*
-		 * To reduce the potential for unnecessarily waiting for completion of
-		 * unrelated transactions, the caller can declare that only
-		 * transactions of the current database are relevant at this stage.
-		 */
-		if (db_specific)
-		{
-			/*
-			 * If we must only keep track of transactions running in the
-			 * current database, we need transaction info from exactly that
-			 * database.
-			 */
-			if (running->dbid != MyDatabaseId)
-			{
-				LogStandbySnapshot(MyDatabaseId);
-
-				return;
-			}
-
-			/*
-			 * We'd better be able to check during scan if the plugin does not
-			 * lie.
-			 */
-			if (accessSharedCatalogsInDecoding)
-				accessSharedCatalogsInDecoding = false;
-		}
-
 		/* returns false if there's no point in performing cleanup just yet */
 		if (!SnapBuildFindSnapshot(builder, lsn, running))
 			return;
 	}
 	else
 		SnapBuildSerialize(builder, lsn);
-
-	/*
-	 * Database specific transaction info may exist to reach CONSISTENT state
-	 * faster, however the code below makes no use of it. Moreover, such
-	 * record might cause problems because the following normal (cluster-wide)
-	 * record can have lower value of oldestRunningXid. In that case, let's
-	 * wait with the cleanup for the next regular cluster-wide record.
-	 */
-	if (OidIsValid(running->dbid))
-		return;
 
 	/*
 	 * Update range of interesting xids based on the running xacts
@@ -1518,11 +1467,7 @@ SnapBuildWaitSnapshot(xl_running_xacts *running, TransactionId cutoff)
 	 */
 	if (!RecoveryInProgress())
 	{
-		/*
-		 * If the last transaction info was about specific database, so needs
-		 * to be the next one - at least until we're in the CONSISTENT state.
-		 */
-		LogStandbySnapshot(running->dbid);
+		LogStandbySnapshot();
 	}
 }
 
@@ -1992,7 +1937,7 @@ snapshot_not_interesting:
 static void
 SnapBuildRestoreContents(int fd, void *dest, Size size, const char *path)
 {
-	int			readBytes;
+	ssize_t		readBytes;
 
 	pgstat_report_wait_start(WAIT_EVENT_SNAPBUILD_READ);
 	readBytes = read(fd, dest, size);
@@ -2013,7 +1958,7 @@ SnapBuildRestoreContents(int fd, void *dest, Size size, const char *path)
 		else
 			ereport(ERROR,
 					(errcode(ERRCODE_DATA_CORRUPTED),
-					 errmsg("could not read file \"%s\": read %d of %zu",
+					 errmsg("could not read file \"%s\": read %zd of %zu",
 							path, readBytes, size)));
 	}
 }

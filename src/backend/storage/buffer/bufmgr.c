@@ -649,10 +649,10 @@ static inline BufferDesc *BufferAlloc(SMgrRelation smgr,
 static bool AsyncReadBuffers(ReadBuffersOperation *operation, int *nblocks_progress);
 static void CheckReadBuffersOperation(ReadBuffersOperation *operation, bool is_complete);
 
-static pg_attribute_always_inline void TrackBufferHit(IOObject io_object,
-													  IOContext io_context,
-													  Relation rel, char persistence, SMgrRelation smgr,
-													  ForkNumber forknum, BlockNumber blocknum);
+static pg_always_inline void TrackBufferHit(IOObject io_object,
+											IOContext io_context,
+											Relation rel, char persistence, SMgrRelation smgr,
+											ForkNumber forknum, BlockNumber blocknum);
 static Buffer GetVictimBuffer(BufferAccessStrategy strategy, IOContext io_context);
 static void FlushUnlockedBuffer(BufferDesc *buf, SMgrRelation reln,
 								IOObject io_object, IOContext io_context);
@@ -791,7 +791,7 @@ PrefetchBuffer(Relation reln, ForkNumber forkNum, BlockNumber blockNum)
 
 	if (RelationUsesLocalBuffers(reln))
 	{
-		/* see comments in ReadBufferExtended */
+		/* see comments in ReadBuffer_common */
 		if (RELATION_IS_OTHER_TEMP(reln))
 			ereport(ERROR,
 					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
@@ -929,18 +929,9 @@ ReadBufferExtended(Relation reln, ForkNumber forkNum, BlockNumber blockNum,
 	Buffer		buf;
 
 	/*
-	 * Reject attempts to read non-local temporary relations; we would be
-	 * likely to get wrong data since we have no visibility into the owning
-	 * session's local buffers.
-	 */
-	if (RELATION_IS_OTHER_TEMP(reln))
-		ereport(ERROR,
-				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-				 errmsg("cannot access temporary tables of other sessions")));
-
-	/*
 	 * Read the buffer, and update pgstat counters to reflect a cache hit or
-	 * miss.
+	 * miss.  The other-session temp-relation check is enforced by
+	 * ReadBuffer_common().
 	 */
 	buf = ReadBuffer_common(reln, RelationGetSmgr(reln), 0,
 							forkNum, blockNum, mode, strategy);
@@ -1228,7 +1219,7 @@ ZeroAndLockBuffer(Buffer buffer, ReadBufferMode mode, bool already_valid)
  * already present, or false if more work is required to either read it in or
  * zero it.
  */
-static pg_attribute_always_inline Buffer
+static pg_always_inline Buffer
 PinBufferForBlock(Relation rel,
 				  SMgrRelation smgr,
 				  char persistence,
@@ -1281,7 +1272,7 @@ PinBufferForBlock(Relation rel,
  *
  * smgr is required, rel is optional unless using P_NEW.
  */
-static pg_attribute_always_inline Buffer
+static pg_always_inline Buffer
 ReadBuffer_common(Relation rel, SMgrRelation smgr, char smgr_persistence,
 				  ForkNumber forkNum,
 				  BlockNumber blockNum, ReadBufferMode mode,
@@ -1289,8 +1280,20 @@ ReadBuffer_common(Relation rel, SMgrRelation smgr, char smgr_persistence,
 {
 	ReadBuffersOperation operation;
 	Buffer		buffer;
-	int			flags;
+	int			readflags;
 	char		persistence;
+
+	/*
+	 * Reject attempts to read non-local temporary relations; we would be
+	 * likely to get wrong data since we have no visibility into the owning
+	 * session's local buffers.  This is the canonical place for the check,
+	 * covering the ReadBufferExtended() entry point and any other caller that
+	 * supplies a Relation.
+	 */
+	if (rel && RELATION_IS_OTHER_TEMP(rel))
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("cannot access temporary tables of other sessions")));
 
 	/*
 	 * Backward compatibility path, most code should use ExtendBufferedRel()
@@ -1299,7 +1302,7 @@ ReadBuffer_common(Relation rel, SMgrRelation smgr, char smgr_persistence,
 	 */
 	if (unlikely(blockNum == P_NEW))
 	{
-		uint32		flags = EB_SKIP_EXTENSION_LOCK;
+		uint32		ebflags = EB_SKIP_EXTENSION_LOCK;
 
 		/*
 		 * Since no-one else can be looking at the page contents yet, there is
@@ -1307,9 +1310,9 @@ ReadBuffer_common(Relation rel, SMgrRelation smgr, char smgr_persistence,
 		 * lock.
 		 */
 		if (mode == RBM_ZERO_AND_LOCK || mode == RBM_ZERO_AND_CLEANUP_LOCK)
-			flags |= EB_LOCK_FIRST;
+			ebflags |= EB_LOCK_FIRST;
 
-		return ExtendBufferedRel(BMR_REL(rel), forkNum, strategy, flags);
+		return ExtendBufferedRel(BMR_REL(rel), forkNum, strategy, ebflags);
 	}
 
 	if (rel)
@@ -1347,9 +1350,9 @@ ReadBuffer_common(Relation rel, SMgrRelation smgr, char smgr_persistence,
 	 * waiting, there is no benefit in actually executing the IO
 	 * asynchronously, it would just add dispatch overhead.
 	 */
-	flags = READ_BUFFERS_SYNCHRONOUSLY;
+	readflags = READ_BUFFERS_SYNCHRONOUSLY;
 	if (mode == RBM_ZERO_ON_ERROR)
-		flags |= READ_BUFFERS_ZERO_ON_ERROR;
+		readflags |= READ_BUFFERS_ZERO_ON_ERROR;
 	operation.smgr = smgr;
 	operation.rel = rel;
 	operation.persistence = persistence;
@@ -1358,13 +1361,13 @@ ReadBuffer_common(Relation rel, SMgrRelation smgr, char smgr_persistence,
 	if (StartReadBuffer(&operation,
 						&buffer,
 						blockNum,
-						flags))
+						readflags))
 		WaitReadBuffers(&operation);
 
 	return buffer;
 }
 
-static pg_attribute_always_inline bool
+static pg_always_inline bool
 StartReadBuffersImpl(ReadBuffersOperation *operation,
 					 Buffer *buffers,
 					 BlockNumber blockNum,
@@ -1381,6 +1384,12 @@ StartReadBuffersImpl(ReadBuffersOperation *operation,
 	Assert(*nblocks == 1 || allow_forwarding);
 	Assert(*nblocks > 0);
 	Assert(*nblocks <= MAX_IO_COMBINE_LIMIT);
+
+	/* see comments in ReadBuffer_common */
+	if (operation->rel && RELATION_IS_OTHER_TEMP(operation->rel))
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("cannot access temporary tables of other sessions")));
 
 	if (operation->persistence == RELPERSISTENCE_TEMP)
 	{
@@ -1670,7 +1679,7 @@ CheckReadBuffersOperation(ReadBuffersOperation *operation, bool is_complete)
  * We track various stats related to buffer hits. Because this is done in a
  * few separate places, this helper exists for convenience.
  */
-static pg_attribute_always_inline void
+static pg_always_inline void
 TrackBufferHit(IOObject io_object, IOContext io_context,
 			   Relation rel, char persistence, SMgrRelation smgr,
 			   ForkNumber forknum, BlockNumber blocknum)
@@ -1820,8 +1829,9 @@ WaitReadBuffers(ReadBuffersOperation *operation)
 				needed_wait = true;
 
 				/*
-				 * The IO operation itself was already counted earlier, in
-				 * AsyncReadBuffers(), this just accounts for the wait time.
+				 * This just accounts for the wait time. The IO operation
+				 * itself was already counted earlier in AsyncReadBuffers() --
+				 * either by us or by another backend if this is a foreign IO.
 				 */
 				pgstat_count_io_op_time(io_object, io_context, IOOP_READ,
 										io_start, 0, 0);
@@ -2009,8 +2019,7 @@ AsyncReadBuffers(ReadBuffersOperation *operation, int *nblocks_progress)
 	 * A secondary benefit is that this would allow us to measure the time in
 	 * pgaio_io_acquire() without causing undue timer overhead in the common,
 	 * non-blocking, case.  However, currently the pgstats infrastructure
-	 * doesn't really allow that, as it a) asserts that an operation can't
-	 * have time without operations b) doesn't have an API to report
+	 * doesn't really allow that because it doesn't have an API to report
 	 * "accumulated" time.
 	 */
 	ioh = pgaio_io_acquire_nb(CurrentResourceOwner, &operation->io_return);
@@ -2184,7 +2193,7 @@ AsyncReadBuffers(ReadBuffersOperation *operation, int *nblocks_progress)
  *
  * No locks are held either at entry or exit.
  */
-static pg_attribute_always_inline BufferDesc *
+static pg_always_inline BufferDesc *
 BufferAlloc(SMgrRelation smgr, char relpersistence, ForkNumber forkNum,
 			BlockNumber blockNum,
 			BufferAccessStrategy strategy,
@@ -2758,9 +2767,23 @@ ExtendBufferedRelCommon(BufferManagerRelation bmr,
 										 extend_by);
 
 	if (bmr.relpersistence == RELPERSISTENCE_TEMP)
+	{
+		/*
+		 * Reject attempts to extend non-local temporary relations; we have no
+		 * ability to transfer about-to-be-created local buffers into the
+		 * owning session's local buffers.  This is the canonical place for
+		 * the check, covering any attempt to extend a non-local temporary
+		 * relation.
+		 */
+		if (bmr.rel && RELATION_IS_OTHER_TEMP(bmr.rel))
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("cannot access temporary tables of other sessions")));
+
 		first_block = ExtendBufferedRelLocal(bmr, fork, flags,
 											 extend_by, extend_upto,
 											 buffers, &extend_by);
+	}
 	else
 		first_block = ExtendBufferedRelShared(bmr, fork, strategy, flags,
 											  extend_by, extend_upto,
@@ -4925,7 +4948,7 @@ DropRelationsAllBuffers(SMgrRelation *smgr_reln, int nlocators)
 	 * forks.
 	 */
 	block = (BlockNumber (*)[MAX_FORKNUM + 1])
-		palloc(sizeof(BlockNumber) * n * (MAX_FORKNUM + 1));
+		palloc_array(BlockNumber, n * (MAX_FORKNUM + 1));
 
 	/*
 	 * We can avoid scanning the entire buffer pool if we know the exact size
@@ -5822,8 +5845,6 @@ MarkBufferDirtyHint(Buffer buffer, bool buffer_std)
 {
 	BufferDesc *bufHdr;
 
-	bufHdr = GetBufferDescriptor(buffer - 1);
-
 	if (!BufferIsValid(buffer))
 		elog(ERROR, "bad buffer ID: %d", buffer);
 
@@ -5832,6 +5853,8 @@ MarkBufferDirtyHint(Buffer buffer, bool buffer_std)
 		MarkLocalBufferDirty(buffer);
 		return;
 	}
+
+	bufHdr = GetBufferDescriptor(buffer - 1);
 
 	MarkSharedBufferDirtyHint(buffer, bufHdr,
 							  pg_atomic_read_u64(&bufHdr->state),
@@ -6706,24 +6729,7 @@ LockBufferForCleanup(Buffer buffer)
 		{
 			/* Successfully acquired exclusive lock with pincount 1 */
 			UnlockBufHdr(bufHdr);
-
-			/*
-			 * Emit the log message if recovery conflict on buffer pin was
-			 * resolved but the startup process waited longer than
-			 * deadlock_timeout for it.
-			 */
-			if (logged_recovery_conflict)
-				LogRecoveryConflict(RECOVERY_CONFLICT_BUFFERPIN,
-									waitStart, GetCurrentTimestamp(),
-									NULL, false);
-
-			if (waiting)
-			{
-				/* reset ps display to remove the suffix if we added one */
-				set_ps_display_remove_suffix();
-				waiting = false;
-			}
-			return;
+			goto cleanup_lock_acquired;
 		}
 		/* Failed, so mark myself as waiting for pincount 1 */
 		if (buf_state & BM_PIN_COUNT_WAITER)
@@ -6734,9 +6740,32 @@ LockBufferForCleanup(Buffer buffer)
 		}
 		bufHdr->wait_backend_pgprocno = MyProcNumber;
 		PinCountWaitBuf = bufHdr;
-		UnlockBufHdrExt(bufHdr, buf_state,
-						BM_PIN_COUNT_WAITER, 0,
-						0);
+
+		/*
+		 * Publish BM_PIN_COUNT_WAITER while retaining the buffer header lock.
+		 * The shared refcount can be decremented while BM_LOCKED is set, so
+		 * use an atomic operation that preserves concurrent refcount changes.
+		 */
+		pg_atomic_fetch_or_u64(&bufHdr->state, BM_PIN_COUNT_WAITER);
+
+		/*
+		 * Recheck the refcount after publishing the waiter flag, while shared
+		 * refcount increments are still prevented by BM_LOCKED.  If only our
+		 * pin remains, the cleanup-lock condition has already been satisfied,
+		 * so remove the waiter state and return without sleeping.
+		 */
+		buf_state = pg_atomic_read_u64(&bufHdr->state);
+
+		if (BUF_STATE_GET_REFCOUNT(buf_state) == 1)
+		{
+			UnlockBufHdrExt(bufHdr, buf_state,
+							0, BM_PIN_COUNT_WAITER,
+							0);
+			PinCountWaitBuf = NULL;
+			goto cleanup_lock_acquired;
+		}
+
+		UnlockBufHdr(bufHdr);
 		LockBuffer(buffer, BUFFER_LOCK_UNLOCK);
 
 		/* Wait to be signaled by UnpinBuffer() */
@@ -6777,12 +6806,12 @@ LockBufferForCleanup(Buffer buffer)
 			if (log_recovery_conflict_waits && waitStart == 0)
 				waitStart = GetCurrentTimestamp();
 
-			/* Publish the bufid that Startup process waits on */
-			SetStartupBufferPinWaitBufId(buffer - 1);
+			/* Publish the buffer that Startup process waits on */
+			SetStartupBufferPinWaitBuf(buffer);
 			/* Set alarm and then wait to be signaled by UnpinBuffer() */
 			ResolveRecoveryConflictWithBufferPin();
-			/* Reset the published bufid */
-			SetStartupBufferPinWaitBufId(-1);
+			/* Reset the published buffer */
+			SetStartupBufferPinWaitBuf(InvalidBuffer);
 		}
 		else
 			ProcWaitForSignal(WAIT_EVENT_BUFFER_CLEANUP);
@@ -6807,6 +6836,26 @@ LockBufferForCleanup(Buffer buffer)
 		PinCountWaitBuf = NULL;
 		/* Loop back and try again */
 	}
+
+cleanup_lock_acquired:
+
+	/*
+	 * Emit the log message if recovery conflict on buffer pin was resolved
+	 * but the startup process waited longer than deadlock_timeout for it.
+	 */
+	if (logged_recovery_conflict)
+		LogRecoveryConflict(RECOVERY_CONFLICT_BUFFERPIN,
+							waitStart, GetCurrentTimestamp(),
+							NULL, false);
+
+	if (waiting)
+	{
+		/* reset ps display to remove the suffix if we added one */
+		set_ps_display_remove_suffix();
+		waiting = false;
+	}
+
+	return;
 }
 
 /*
@@ -6816,18 +6865,18 @@ LockBufferForCleanup(Buffer buffer)
 bool
 HoldingBufferPinThatDelaysRecovery(void)
 {
-	int			bufid = GetStartupBufferPinWaitBufId();
+	Buffer		buffer = GetStartupBufferPinWaitBuf();
 
 	/*
 	 * If we get woken slowly then it's possible that the Startup process was
 	 * already woken by other backends before we got here. Also possible that
 	 * we get here by multiple interrupts or interrupts at inappropriate
-	 * times, so make sure we do nothing if the bufid is not set.
+	 * times, so make sure we do nothing if the buffer is not set.
 	 */
-	if (bufid < 0)
+	if (buffer == InvalidBuffer)
 		return false;
 
-	if (GetPrivateRefCount(bufid + 1) > 0)
+	if (GetPrivateRefCount(buffer) > 0)
 		return true;
 
 	return false;
@@ -8277,7 +8326,7 @@ MarkDirtyAllUnpinnedBuffers(int32 *buffers_dirtied,
  * part of error handling, which in turn could lead to the buffer being
  * replaced while IO is ongoing.
  */
-static pg_attribute_always_inline void
+static pg_always_inline void
 buffer_stage_common(PgAioHandle *ioh, bool is_write, bool is_temp)
 {
 	uint64	   *io_data;
@@ -8521,7 +8570,7 @@ buffer_readv_encode_error(PgAioResult *result,
  * Helper for AIO readv completion callbacks, supporting both shared and temp
  * buffers. Gets called once for each buffer in a multi-page read.
  */
-static pg_attribute_always_inline void
+static pg_always_inline void
 buffer_readv_complete_one(PgAioTargetData *td, uint8 buf_off, Buffer buffer,
 						  uint8 flags, bool failed, bool is_temp,
 						  bool *buffer_invalid,
@@ -8672,7 +8721,7 @@ buffer_readv_complete_one(PgAioTargetData *td, uint8 buf_off, Buffer buffer,
  *
  * Shared between shared and local buffers, to reduce code duplication.
  */
-static pg_attribute_always_inline PgAioResult
+static pg_always_inline PgAioResult
 buffer_readv_complete(PgAioHandle *ioh, PgAioResult prior_result,
 					  uint8 cb_data, bool is_temp)
 {

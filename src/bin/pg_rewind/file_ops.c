@@ -48,6 +48,9 @@ open_target_file(const char *path, bool trunc)
 {
 	int			mode;
 
+	if (!path_is_safe_for_extraction(path))
+		pg_fatal("target file path is unsafe for open: \"%s\"", path);
+
 	if (dry_run)
 		return;
 
@@ -188,6 +191,9 @@ remove_target_file(const char *path, bool missing_ok)
 {
 	char		dstpath[MAXPGPATH];
 
+	if (!path_is_safe_for_extraction(path))
+		pg_fatal("target file path is unsafe for removal: \"%s\"", path);
+
 	if (dry_run)
 		return;
 
@@ -207,6 +213,9 @@ truncate_target_file(const char *path, off_t newsize)
 {
 	char		dstpath[MAXPGPATH];
 	int			fd;
+
+	if (!path_is_safe_for_extraction(path))
+		pg_fatal("target file path is unsafe for truncation: \"%s\"", path);
 
 	if (dry_run)
 		return;
@@ -230,6 +239,10 @@ create_target_dir(const char *path)
 {
 	char		dstpath[MAXPGPATH];
 
+	if (!path_is_safe_for_extraction(path))
+		pg_fatal("target directory path is unsafe for directory creation: \"%s\"",
+				 path);
+
 	if (dry_run)
 		return;
 
@@ -243,6 +256,10 @@ static void
 remove_target_dir(const char *path)
 {
 	char		dstpath[MAXPGPATH];
+
+	if (!path_is_safe_for_extraction(path))
+		pg_fatal("target directory path is unsafe for directory removal: \"%s\"",
+				 path);
 
 	if (dry_run)
 		return;
@@ -258,6 +275,9 @@ create_target_symlink(const char *path, const char *link)
 {
 	char		dstpath[MAXPGPATH];
 
+	if (!path_is_safe_for_extraction(path))
+		pg_fatal("target symlink path is unsafe for creation: \"%s\"", path);
+
 	if (dry_run)
 		return;
 
@@ -271,6 +291,9 @@ static void
 remove_target_symlink(const char *path)
 {
 	char		dstpath[MAXPGPATH];
+
+	if (!path_is_safe_for_extraction(path))
+		pg_fatal("target symlink path is unsafe for removal: \"%s\"", path);
 
 	if (dry_run)
 		return;
@@ -317,8 +340,8 @@ slurpFile(const char *datadir, const char *path, size_t *filesize)
 	char	   *buffer;
 	struct stat statbuf;
 	char		fullpath[MAXPGPATH];
-	int			len;
-	int			r;
+	size_t		len;
+	ssize_t		r;
 
 	snprintf(fullpath, sizeof(fullpath), "%s/%s", datadir, path);
 
@@ -341,8 +364,8 @@ slurpFile(const char *datadir, const char *path, size_t *filesize)
 			pg_fatal("could not read file \"%s\": %m",
 					 fullpath);
 		else
-			pg_fatal("could not read file \"%s\": read %d of %zu",
-					 fullpath, r, (Size) len);
+			pg_fatal("could not read file \"%s\": read %zd of %zu",
+					 fullpath, r, len);
 	}
 	close(fd);
 
@@ -434,7 +457,7 @@ recurse_dir(const char *datadir, const char *parentpath,
 		else if (S_ISLNK(fst.st_mode))
 		{
 			char		link_target[MAXPGPATH];
-			int			len;
+			ssize_t		len;
 
 			len = readlink(fullpath, link_target, sizeof(link_target));
 			if (len < 0)

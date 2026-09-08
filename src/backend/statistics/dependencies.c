@@ -70,7 +70,7 @@ static bool dependency_is_fully_matched(MVDependency *dependency,
 static bool dependency_is_compatible_clause(Node *clause, Index relid,
 											AttrNumber *attnum);
 static bool dependency_is_compatible_expression(Node *clause, Index relid,
-												List *statlist, Node **expr);
+												List *statlist, Node **stat_expr_p);
 static MVDependency *find_strongest_dependency(MVDependencies **dependencies,
 											   int ndependencies, Bitmapset *attnums);
 static Selectivity clauselist_apply_dependencies(PlannerInfo *root, List *clauses,
@@ -136,8 +136,9 @@ generate_dependencies_recurse(DependencyGenerator state, int index,
 			 */
 			if (!match)
 			{
-				state->dependencies = (AttrNumber *) repalloc(state->dependencies,
-															  state->k * (state->ndependencies + 1) * sizeof(AttrNumber));
+				state->dependencies = repalloc_array(state->dependencies,
+													 AttrNumber,
+													 state->k * (state->ndependencies + 1));
 				memcpy(&state->dependencies[(state->k * state->ndependencies)],
 					   current, state->k * sizeof(AttrNumber));
 				state->ndependencies++;
@@ -436,7 +437,6 @@ statext_dependencies_build(StatsBuildData *data)
 bytea *
 statext_dependencies_serialize(MVDependencies *dependencies)
 {
-	int			i;
 	bytea	   *output;
 	char	   *tmp;
 	Size		len;
@@ -445,7 +445,7 @@ statext_dependencies_serialize(MVDependencies *dependencies)
 	len = VARHDRSZ + SizeOfHeader;
 
 	/* and also include space for the actual attribute numbers and degrees */
-	for (i = 0; i < dependencies->ndeps; i++)
+	for (uint32 i = 0; i < dependencies->ndeps; i++)
 		len += SizeOfItem(dependencies->deps[i]->nattributes);
 
 	output = (bytea *) palloc0(len);
@@ -462,7 +462,7 @@ statext_dependencies_serialize(MVDependencies *dependencies)
 	tmp += sizeof(uint32);
 
 	/* store number of attributes and attribute numbers for each dependency */
-	for (i = 0; i < dependencies->ndeps; i++)
+	for (uint32 i = 0; i < dependencies->ndeps; i++)
 	{
 		MVDependency *d = dependencies->deps[i];
 
@@ -491,7 +491,6 @@ statext_dependencies_serialize(MVDependencies *dependencies)
 MVDependencies *
 statext_dependencies_deserialize(bytea *data)
 {
-	int			i;
 	Size		min_expected_size;
 	MVDependencies *dependencies;
 	char	   *tmp;
@@ -529,7 +528,7 @@ statext_dependencies_deserialize(bytea *data)
 		elog(ERROR, "invalid zero-length item array in MVDependencies");
 
 	/* what minimum bytea size do we expect for those parameters */
-	min_expected_size = SizeOfItem(dependencies->ndeps);
+	min_expected_size = MinSizeOfItems(dependencies->ndeps);
 
 	if (VARSIZE_ANY_EXHDR(data) < min_expected_size)
 		elog(ERROR, "invalid dependencies size %zu (expected at least %zu)",
@@ -539,7 +538,7 @@ statext_dependencies_deserialize(bytea *data)
 	dependencies = repalloc(dependencies, offsetof(MVDependencies, deps)
 							+ (dependencies->ndeps * sizeof(MVDependency *)));
 
-	for (i = 0; i < dependencies->ndeps; i++)
+	for (uint32 i = 0; i < dependencies->ndeps; i++)
 	{
 		double		degree;
 		AttrNumber	k;
@@ -585,7 +584,7 @@ statext_dependencies_deserialize(bytea *data)
 void
 statext_dependencies_free(MVDependencies *dependencies)
 {
-	for (int i = 0; i < dependencies->ndeps; i++)
+	for (uint32 i = 0; i < dependencies->ndeps; i++)
 		pfree(dependencies->deps[i]);
 	pfree(dependencies);
 }
@@ -610,7 +609,7 @@ statext_dependencies_validate(const MVDependencies *dependencies,
 	int			attnum_expr_lowbound = 0 - numexprs;
 
 	/* Scan through each dependency entry */
-	for (int i = 0; i < dependencies->ndeps; i++)
+	for (uint32 i = 0; i < dependencies->ndeps; i++)
 	{
 		const MVDependency *dep = dependencies->deps[i];
 
@@ -913,8 +912,6 @@ static MVDependency *
 find_strongest_dependency(MVDependencies **dependencies, int ndependencies,
 						  Bitmapset *attnums)
 {
-	int			i,
-				j;
 	MVDependency *strongest = NULL;
 
 	/* number of attnums in clauses */
@@ -925,9 +922,9 @@ find_strongest_dependency(MVDependencies **dependencies, int ndependencies,
 	 * fully-matched dependencies. We do the cheap checks first, before
 	 * matching it against the attnums.
 	 */
-	for (i = 0; i < ndependencies; i++)
+	for (int i = 0; i < ndependencies; i++)
 	{
-		for (j = 0; j < dependencies[i]->ndeps; j++)
+		for (uint32 j = 0; j < dependencies[i]->ndeps; j++)
 		{
 			MVDependency *dependency = dependencies[i]->deps[j];
 
@@ -1146,10 +1143,10 @@ clauselist_apply_dependencies(PlannerInfo *root, List *clauses,
  *
  * Similar to dependency_is_compatible_clause, but doesn't enforce that the
  * expression is a simple Var.  On success, return the matching statistics
- * expression into *expr.
+ * expression into *stat_expr_p.
  */
 static bool
-dependency_is_compatible_expression(Node *clause, Index relid, List *statlist, Node **expr)
+dependency_is_compatible_expression(Node *clause, Index relid, List *statlist, Node **stat_expr_p)
 {
 	ListCell   *lc,
 			   *lc2;
@@ -1173,17 +1170,17 @@ dependency_is_compatible_expression(Node *clause, Index relid, List *statlist, N
 	if (is_opclause(clause))
 	{
 		/* If it's an opclause, check for Var = Const or Const = Var. */
-		OpExpr	   *expr = (OpExpr *) clause;
+		OpExpr	   *opexpr = (OpExpr *) clause;
 
 		/* Only expressions with two arguments are candidates. */
-		if (list_length(expr->args) != 2)
+		if (list_length(opexpr->args) != 2)
 			return false;
 
 		/* Make sure non-selected argument is a pseudoconstant. */
-		if (is_pseudo_constant_clause(lsecond(expr->args)))
-			clause_expr = linitial(expr->args);
-		else if (is_pseudo_constant_clause(linitial(expr->args)))
-			clause_expr = lsecond(expr->args);
+		if (is_pseudo_constant_clause(lsecond(opexpr->args)))
+			clause_expr = linitial(opexpr->args);
+		else if (is_pseudo_constant_clause(linitial(opexpr->args)))
+			clause_expr = lsecond(opexpr->args);
 		else
 			return false;
 
@@ -1199,7 +1196,7 @@ dependency_is_compatible_expression(Node *clause, Index relid, List *statlist, N
 		 * selectivity functions, and to be more consistent with decisions
 		 * elsewhere in the planner.
 		 */
-		if (get_oprrest(expr->opno) != F_EQSEL)
+		if (get_oprrest(opexpr->opno) != F_EQSEL)
 			return false;
 
 		/* OK to proceed with checking "var" */
@@ -1248,7 +1245,7 @@ dependency_is_compatible_expression(Node *clause, Index relid, List *statlist, N
 		BoolExpr   *bool_expr = (BoolExpr *) clause;
 
 		/* start with no expression (we'll use the first match) */
-		*expr = NULL;
+		*stat_expr_p = NULL;
 
 		foreach(lc, bool_expr->args)
 		{
@@ -1262,11 +1259,11 @@ dependency_is_compatible_expression(Node *clause, Index relid, List *statlist, N
 													 statlist, &or_expr))
 				return false;
 
-			if (*expr == NULL)
-				*expr = or_expr;
+			if (*stat_expr_p == NULL)
+				*stat_expr_p = or_expr;
 
 			/* ensure all the expressions are the same */
-			if (!equal(or_expr, *expr))
+			if (!equal(or_expr, *stat_expr_p))
 				return false;
 		}
 
@@ -1314,7 +1311,7 @@ dependency_is_compatible_expression(Node *clause, Index relid, List *statlist, N
 
 			if (equal(clause_expr, stat_expr))
 			{
-				*expr = stat_expr;
+				*stat_expr_p = stat_expr;
 				return true;
 			}
 		}
@@ -1369,7 +1366,6 @@ dependencies_clauselist_selectivity(PlannerInfo *root,
 	int			total_ndeps;
 	MVDependency **dependencies;
 	int			ndependencies;
-	int			i;
 	AttrNumber	attnum_offset;
 	RangeTblEntry *rte = planner_rt_fetch(rel->relid, root);
 
@@ -1439,7 +1435,7 @@ dependencies_clauselist_selectivity(PlannerInfo *root,
 				Assert(expr != NULL);
 
 				/* If the expression is duplicate, use the same attnum. */
-				for (i = 0; i < unique_exprs_cnt; i++)
+				for (int i = 0; i < unique_exprs_cnt; i++)
 				{
 					if (equal(unique_exprs[i], expr))
 					{
@@ -1482,7 +1478,7 @@ dependencies_clauselist_selectivity(PlannerInfo *root,
 	 * Now that we know how many expressions there are, we can offset the
 	 * values just enough to build the bitmapset.
 	 */
-	for (i = 0; i < list_length(clauses); i++)
+	for (int i = 0; i < list_length(clauses); i++)
 	{
 		AttrNumber	attnum;
 
@@ -1587,7 +1583,7 @@ dependencies_clauselist_selectivity(PlannerInfo *root,
 
 		/* count matching expressions */
 		nexprs = 0;
-		for (i = 0; i < unique_exprs_cnt; i++)
+		for (int i = 0; i < unique_exprs_cnt; i++)
 		{
 			ListCell   *lc;
 
@@ -1638,15 +1634,14 @@ dependencies_clauselist_selectivity(PlannerInfo *root,
 		 */
 		if (unique_exprs_cnt > 0 || stat->exprs != NIL)
 		{
-			int			ndeps = 0;
+			uint32		ndeps = 0;
 
-			for (i = 0; i < deps->ndeps; i++)
+			for (uint32 i = 0; i < deps->ndeps; i++)
 			{
 				bool		skip = false;
 				MVDependency *dep = deps->deps[i];
-				int			j;
 
-				for (j = 0; j < dep->nattributes; j++)
+				for (int j = 0; j < dep->nattributes; j++)
 				{
 					int			idx;
 					Node	   *expr;
@@ -1797,7 +1792,7 @@ dependencies_clauselist_selectivity(PlannerInfo *root,
 										   list_attnums, estimatedclauses);
 
 	/* free deserialized functional dependencies (and then the array) */
-	for (i = 0; i < nfunc_dependencies; i++)
+	for (int i = 0; i < nfunc_dependencies; i++)
 		pfree(func_dependencies[i]);
 
 	pfree(dependencies);

@@ -347,10 +347,10 @@ SetAt(metastring *s, int pos, char c)
 
 
 /*
-   Caveats: the START value is 0 based
-*/
+ * Caveats: the START value is 0 based
+ */
 static int
-StringAt(metastring *s, int start, int length,...)
+StringAt(metastring *s, int start, int length, ...)
 {
 	char	   *test;
 	char	   *pos;
@@ -808,11 +808,10 @@ DoubleMetaphone(const char *str, Oid collid, char **codes)
 						MetaphAdd(primary, "KN");
 						MetaphAdd(secondary, "N");
 					}
-					else
-						/* not e.g. 'cagney' */
-						if (!StringAt(original, (current + 2), 2, "EY", "")
-							&& (GetAt(original, current + 1) != 'Y')
-							&& !SlavoGermanic(original))
+					/* not e.g. 'cagney' */
+					else if (!StringAt(original, (current + 2), 2, "EY", "")
+							 && (GetAt(original, current + 1) != 'Y')
+							 && !SlavoGermanic(original))
 					{
 						MetaphAdd(primary, "N");
 						MetaphAdd(secondary, "KN");

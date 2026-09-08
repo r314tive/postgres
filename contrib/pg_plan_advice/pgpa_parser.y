@@ -106,6 +106,8 @@ advice_item: TOK_TAG_JOIN_ORDER '(' join_order_target_list ')'
 			$$ = palloc0_object(pgpa_advice_item);
 			if (strcmp($1, "bitmap_heap_scan") == 0)
 				$$->tag = PGPA_TAG_BITMAP_HEAP_SCAN;
+			else if (strcmp($1, "do_not_scan") == 0)
+				$$->tag = PGPA_TAG_DO_NOT_SCAN;
 			else if (strcmp($1, "no_gather") == 0)
 				$$->tag = PGPA_TAG_NO_GATHER;
 			else if (strcmp($1, "seq_scan") == 0)
@@ -133,7 +135,7 @@ advice_item: TOK_TAG_JOIN_ORDER '(' join_order_target_list ')'
 				foreach_ptr(pgpa_advice_target, target, $3)
 				{
 					if (target->ttype == PGPA_TARGET_IDENTIFIER ||
-						list_length(target->children) == 1)
+						list_length(target->children) < 2)
 							pgpa_yyerror(result, parse_error_msg_p, yyscanner,
 										 "FOREIGN_JOIN targets must contain more than one relation identifier");
 				}

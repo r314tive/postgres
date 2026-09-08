@@ -37,7 +37,6 @@
 #include "access/transam.h"
 #include "access/twophase.h"
 #include "access/xlogutils.h"
-#include "access/xlogwait.h"
 #include "miscadmin.h"
 #include "pgstat.h"
 #include "postmaster/autovacuum.h"
@@ -239,9 +238,10 @@ ProcGlobalShmemInit(void *arg)
 	dlist_init(&ProcGlobal->autovacFreeProcs);
 	dlist_init(&ProcGlobal->bgworkerFreeProcs);
 	dlist_init(&ProcGlobal->walsenderFreeProcs);
-	ProcGlobal->startupBufferPinWaitBufId = -1;
-	ProcGlobal->walwriterProc = INVALID_PROC_NUMBER;
-	ProcGlobal->checkpointerProc = INVALID_PROC_NUMBER;
+	ProcGlobal->startupBufferPinWaitBuf = InvalidBuffer;
+	pg_atomic_init_u32(&ProcGlobal->avLauncherProc, INVALID_PROC_NUMBER);
+	pg_atomic_init_u32(&ProcGlobal->walwriterProc, INVALID_PROC_NUMBER);
+	pg_atomic_init_u32(&ProcGlobal->checkpointerProc, INVALID_PROC_NUMBER);
 	pg_atomic_init_u32(&ProcGlobal->procArrayGroupFirst, INVALID_PROC_NUMBER);
 	pg_atomic_init_u32(&ProcGlobal->clogGroupFirst, INVALID_PROC_NUMBER);
 
@@ -549,6 +549,10 @@ InitProcess(void)
 	 */
 	PGSemaphoreReset(MyProc->sem);
 
+	/* autovacuum launcher is specially advertised in ProcGlobal */
+	if (MyBackendType == B_AUTOVAC_LAUNCHER)
+		pg_atomic_write_u32(&ProcGlobal->avLauncherProc, MyProcNumber);
+
 	/*
 	 * Arrange to clean up at backend exit.
 	 */
@@ -660,8 +664,7 @@ InitAuxiliaryProcess(void)
 	}
 
 	/* Mark auxiliary proc as in use by me */
-	/* use volatile pointer to prevent code rearrangement */
-	((volatile PGPROC *) auxproc)->pid = MyProcPid;
+	auxproc->pid = MyProcPid;
 
 	SpinLockRelease(&ProcGlobal->freeProcsLock);
 
@@ -725,6 +728,12 @@ InitAuxiliaryProcess(void)
 	 */
 	PGSemaphoreReset(MyProc->sem);
 
+	/* Some aux processes are also advertised in ProcGlobal */
+	if (MyBackendType == B_WAL_WRITER)
+		pg_atomic_write_u32(&ProcGlobal->walwriterProc, MyProcNumber);
+	if (MyBackendType == B_CHECKPOINTER)
+		pg_atomic_write_u32(&ProcGlobal->checkpointerProc, MyProcNumber);
+
 	/*
 	 * Arrange to clean up at process exit.
 	 */
@@ -750,30 +759,30 @@ InitAuxiliaryProcess(void)
 
 /*
  * Used from bufmgr to share the value of the buffer that Startup waits on,
- * or to reset the value to "not waiting" (-1). This allows processing
- * of recovery conflicts for buffer pins. Set is made before backends look
- * at this value, so locking not required, especially since the set is
- * an atomic integer set operation.
+ * or to reset the value to "not waiting" (InvalidBuffer). This allows
+ * processing of recovery conflicts for buffer pins. Set is made before
+ * backends look at this value, so locking not required, especially since
+ * the set is an atomic integer set operation.
  */
 void
-SetStartupBufferPinWaitBufId(int bufid)
+SetStartupBufferPinWaitBuf(Buffer buffer)
 {
 	/* use volatile pointer to prevent code rearrangement */
 	volatile PROC_HDR *procglobal = ProcGlobal;
 
-	procglobal->startupBufferPinWaitBufId = bufid;
+	procglobal->startupBufferPinWaitBuf = buffer;
 }
 
 /*
  * Used by backends when they receive a request to check for buffer pin waits.
  */
-int
-GetStartupBufferPinWaitBufId(void)
+Buffer
+GetStartupBufferPinWaitBuf(void)
 {
 	/* use volatile pointer to prevent code rearrangement */
 	volatile PROC_HDR *procglobal = ProcGlobal;
 
-	return procglobal->startupBufferPinWaitBufId;
+	return procglobal->startupBufferPinWaitBuf;
 }
 
 /*
@@ -924,7 +933,10 @@ static void
 ProcKill(int code, Datum arg)
 {
 	PGPROC	   *proc;
+	PGPROC	   *leader;
 	dlist_head *procgloballist;
+	bool		push_leader;
+	bool		push_self;
 
 	Assert(MyProc != NULL);
 
@@ -952,78 +964,109 @@ ProcKill(int code, Datum arg)
 	 */
 	LWLockReleaseAll();
 
-	/*
-	 * Cleanup waiting for LSN if any.
-	 */
-	WaitLSNCleanup();
-
 	/* Cancel any pending condition variable sleep, too */
 	ConditionVariableCancelSleep();
 
 	/*
-	 * Detach from any lock group of which we are a member.  If the leader
-	 * exits before all other group members, its PGPROC will remain allocated
-	 * until the last group process exits; that process must return the
-	 * leader's PGPROC to the appropriate list.
+	 * Reset MyLatch to the process local one and disown the shared latch, so
+	 * that signal handlers et al can continue using the latch after the
+	 * shared latch isn't ours anymore.
+	 *
+	 * DisownLatch() must happen before our PGPROC can appear on a freelist: a
+	 * newly-forked backend that pops our slot and calls OwnLatch() would
+	 * PANIC on a still-owned latch.
+	 *
+	 * pgstat_reset_wait_event_storage() is intentionally deferred until after
+	 * the lock-group block so that wait_event_info remains visible in our
+	 * PGPROC slot while we may be observed there.  It is safe to defer
+	 * because our slot is not yet on any freelist at this point, and useful
+	 * for testing purposes.
 	 */
-	if (MyProc->lockGroupLeader != NULL)
+	SwitchBackToLocalLatch();
+	DisownLatch(&MyProc->procLatch);
+
+	if (MyBackendType == B_AUTOVAC_LAUNCHER)
 	{
-		PGPROC	   *leader = MyProc->lockGroupLeader;
-		LWLock	   *leader_lwlock = LockHashPartitionLockByProc(leader);
+		Assert(pg_atomic_read_u32(&ProcGlobal->avLauncherProc) == MyProcNumber);
+		pg_atomic_write_u32(&ProcGlobal->avLauncherProc, INVALID_PROC_NUMBER);
+	}
+
+	proc = MyProc;
+	procgloballist = proc->procgloballist;
+
+	/*
+	 * Detach from any lock group of which we are a member, deciding under
+	 * leader_lwlock whether we (via push_self) and/or the leader (via
+	 * push_leader) need to be pushed onto a freelist.  The actual pushes
+	 * happen after evaluating if any of these are required, under a single
+	 * ProcGlobal->freeProcsLock.
+	 *
+	 * The decision whether any of the freelists needs to be updated is taken
+	 * under a single leader_lwlock.
+	 */
+	push_leader = false;
+	push_self = true;
+	leader = NULL;
+
+	if (proc->lockGroupLeader != NULL)
+	{
+		LWLock	   *leader_lwlock;
+
+		leader = proc->lockGroupLeader;
+		leader_lwlock = LockHashPartitionLockByProc(leader);
 
 		LWLockAcquire(leader_lwlock, LW_EXCLUSIVE);
 		Assert(!dlist_is_empty(&leader->lockGroupMembers));
-		dlist_delete(&MyProc->lockGroupLink);
+		dlist_delete(&proc->lockGroupLink);
 		if (dlist_is_empty(&leader->lockGroupMembers))
 		{
 			leader->lockGroupLeader = NULL;
-			if (leader != MyProc)
+			if (leader != proc)
 			{
-				procgloballist = leader->procgloballist;
-
-				/* Leader exited first; return its PGPROC. */
-				SpinLockAcquire(&ProcGlobal->freeProcsLock);
-				dlist_push_head(procgloballist, &leader->freeProcsLink);
-				SpinLockRelease(&ProcGlobal->freeProcsLock);
+				/*
+				 * We are the last follower and the leader exited earlier; its
+				 * PGPROC is still allocated and must be pushed here.
+				 */
+				push_leader = true;
+				proc->lockGroupLeader = NULL;
 			}
 		}
-		else if (leader != MyProc)
-			MyProc->lockGroupLeader = NULL;
+		else if (leader != proc)
+		{
+			/* Non-last follower; leader still present in the group. */
+			proc->lockGroupLeader = NULL;
+		}
+		else
+		{
+			/*
+			 * We are the leader and followers remain.  Skip our own push; the
+			 * last follower to exit will push us back to the freelist.
+			 */
+			push_self = false;
+		}
 		LWLockRelease(leader_lwlock);
 	}
 
-	/*
-	 * Reset MyLatch to the process local one.  This is so that signal
-	 * handlers et al can continue using the latch after the shared latch
-	 * isn't ours anymore.
-	 *
-	 * Similarly, stop reporting wait events to MyProc->wait_event_info.
-	 *
-	 * After that clear MyProc and disown the shared latch.
-	 */
-	SwitchBackToLocalLatch();
+	/* See comment above, close to DisownLatch() */
 	pgstat_reset_wait_event_storage();
 
-	proc = MyProc;
 	MyProc = NULL;
 	MyProcNumber = INVALID_PROC_NUMBER;
-	DisownLatch(&proc->procLatch);
 
 	/* Mark the proc no longer in use */
 	proc->pid = 0;
 	proc->vxid.procNumber = INVALID_PROC_NUMBER;
 	proc->vxid.lxid = InvalidTransactionId;
 
-	procgloballist = proc->procgloballist;
 	SpinLockAcquire(&ProcGlobal->freeProcsLock);
-
-	/*
-	 * If we're still a member of a locking group, that means we're a leader
-	 * which has somehow exited before its children.  The last remaining child
-	 * will release our PGPROC.  Otherwise, release it now.
-	 */
-	if (proc->lockGroupLeader == NULL)
+	if (push_leader)
 	{
+		/* Return leader PGPROC (and semaphore) to appropriate freelist */
+		dlist_push_head(leader->procgloballist, &leader->freeProcsLink);
+	}
+	if (push_self)
+	{
+		Assert(proc->lockGroupLeader == NULL);
 		/* Since lockGroupLeader is NULL, lockGroupMembers should be empty. */
 		Assert(dlist_is_empty(&proc->lockGroupMembers));
 
@@ -1068,6 +1111,20 @@ AuxiliaryProcKill(int code, Datum arg)
 	/* look at the equivalent ProcKill() code for comments */
 	SwitchBackToLocalLatch();
 	pgstat_reset_wait_event_storage();
+
+	/*
+	 * If this was one of the aux processes advertised in ProcGlobal, clear it
+	 */
+	if (MyBackendType == B_WAL_WRITER)
+	{
+		Assert(pg_atomic_read_u32(&ProcGlobal->walwriterProc) == MyProcNumber);
+		pg_atomic_write_u32(&ProcGlobal->walwriterProc, INVALID_PROC_NUMBER);
+	}
+	if (MyBackendType == B_CHECKPOINTER)
+	{
+		Assert(pg_atomic_read_u32(&ProcGlobal->checkpointerProc) == MyProcNumber);
+		pg_atomic_write_u32(&ProcGlobal->checkpointerProc, INVALID_PROC_NUMBER);
+	}
 
 	proc = MyProc;
 	MyProc = NULL;
@@ -1575,12 +1632,13 @@ ProcSleep(LOCALLOCK *locallock)
 			TimestampDifference(get_timeout_start_time(DEADLOCK_TIMEOUT),
 								GetCurrentTimestamp(),
 								&secs, &usecs);
-			msecs = secs * 1000 + usecs / 1000;
-			usecs = usecs % 1000;
-
 			/* Increment the lock statistics counters if done waiting. */
 			if (myWaitStatus == PROC_WAIT_STATUS_OK)
-				pgstat_count_lock_waits(locallock->tag.lock.locktag_type, msecs);
+				pgstat_count_lock_waits(locallock->tag.lock.locktag_type,
+										(PgStat_Counter) secs * 1000000 + usecs);
+
+			msecs = secs * 1000 + usecs / 1000;
+			usecs = usecs % 1000;
 
 			if (log_lock_waits)
 			{

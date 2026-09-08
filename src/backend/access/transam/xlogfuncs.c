@@ -245,7 +245,7 @@ pg_log_standby_snapshot(PG_FUNCTION_ARGS)
 				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
 				 errmsg("pg_log_standby_snapshot() can only be used if \"wal_level\" >= \"replica\"")));
 
-	recptr = LogStandbySnapshot(InvalidOid);
+	recptr = LogStandbySnapshot();
 
 	/*
 	 * As a convenience, return the WAL location of the last inserted record
@@ -448,7 +448,7 @@ pg_walfile_name_offset(PG_FUNCTION_ARGS)
 	 */
 	xrecoff = XLogSegmentOffset(locationpoint, wal_segment_size);
 
-	values[1] = UInt32GetDatum(xrecoff);
+	values[1] = Int32GetDatum(xrecoff);
 	isnull[1] = false;
 
 	/*

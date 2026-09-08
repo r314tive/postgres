@@ -48,9 +48,7 @@
 #include <openssl/bn.h>
 #include <openssl/conf.h>
 #include <openssl/dh.h>
-#ifndef OPENSSL_NO_ECDH
 #include <openssl/ec.h>
-#endif
 #include <openssl/x509v3.h>
 
 /*
@@ -62,7 +60,7 @@ typedef struct
 {
 	uint32		status;
 	const char *hostname;
-}			HostCacheEntry;
+} HostCacheEntry;
 static uint32 host_cache_pointer(const char *key);
 #define SH_PREFIX		host_cache
 #define SH_ELEMENT_TYPE	HostCacheEntry
@@ -100,13 +98,14 @@ static bool initialize_dh(SSL_CTX *context, bool isServerStart);
 static bool initialize_ecdh(SSL_CTX *context, bool isServerStart);
 static const char *SSLerrmessageExt(unsigned long ecode, const char *replacement);
 static const char *SSLerrmessage(unsigned long ecode);
-static bool init_host_context(HostsLine *host, bool isServerStart);
+static bool init_host_context(HostsLine *host, bool isServerStart, bool *hasWarned)
+			pg_attribute_nonnull(3);
 static void host_context_cleanup_cb(void *arg);
 #ifdef HAVE_SSL_CTX_SET_CLIENT_HELLO_CB
 static int	sni_clienthello_cb(SSL *ssl, int *al, void *arg);
 #endif
 
-static char *X509_NAME_to_cstring(X509_NAME *name);
+static char *X509_NAME_to_cstring(const X509_NAME *name);
 
 static SSL_CTX *SSL_context = NULL;
 static MemoryContext SSL_hosts_memcxt = NULL;
@@ -162,6 +161,7 @@ be_tls_init(bool isServerStart)
 	int			ssl_ver_min = -1;
 	int			ssl_ver_max = -1;
 	host_cache_hash *host_cache = NULL;
+	bool		hasWarned = false;
 
 	/*
 	 * Since we don't know which host we're using until the ClientHello is
@@ -230,7 +230,7 @@ be_tls_init(bool isServerStart)
 		{
 			ereport(isServerStart ? FATAL : LOG,
 					errcode(ERRCODE_CONFIG_FILE_ERROR),
-					errmsg("could not load \"%s\": %s", "pg_hosts.conf",
+					errmsg("could not load \"%s\": %s", HostsFileName,
 						   err_msg ? err_msg : "unknown error"));
 			goto error;
 		}
@@ -251,7 +251,7 @@ be_tls_init(bool isServerStart)
 		{
 			HostsLine  *host = lfirst(line);
 
-			if (!init_host_context(host, isServerStart))
+			if (!init_host_context(host, isServerStart, &hasWarned))
 				goto error;
 
 			/*
@@ -333,7 +333,7 @@ be_tls_init(bool isServerStart)
 	 */
 	else if (res == HOSTSFILE_DISABLED || res == HOSTSFILE_EMPTY || res == HOSTSFILE_MISSING)
 	{
-		HostsLine  *pgconf = palloc0(sizeof(HostsLine));
+		HostsLine  *pgconf = palloc0_object(HostsLine);
 
 #ifdef USE_ASSERT_CHECKING
 		if (res == HOSTSFILE_DISABLED)
@@ -346,7 +346,7 @@ be_tls_init(bool isServerStart)
 		pgconf->ssl_passphrase_cmd = ssl_passphrase_command;
 		pgconf->ssl_passphrase_reload = ssl_passphrase_command_supports_reload;
 
-		if (!init_host_context(pgconf, isServerStart))
+		if (!init_host_context(pgconf, isServerStart, &hasWarned))
 			goto error;
 
 		/*
@@ -366,8 +366,8 @@ be_tls_init(bool isServerStart)
 				errcode(ERRCODE_CONFIG_FILE_ERROR),
 				errmsg("no SSL configurations loaded"),
 		/*- translator: The two %s contain filenames */
-				errhint("If ssl_sni is enabled then add configuration to \"%s\", else \"%s\"",
-						"pg_hosts.conf", "postgresql.conf"));
+				errhint("If ssl_sni is enabled then add configuration to \"%s\", else \"%s\".",
+						HostsFileName, "postgresql.conf"));
 		goto error;
 	}
 
@@ -377,13 +377,8 @@ be_tls_init(bool isServerStart)
 	 * Create a new SSL context into which we'll load all the configuration
 	 * settings.  If we fail partway through, we can avoid memory leakage by
 	 * freeing this context; we don't install it as active until the end.
-	 *
-	 * We use SSLv23_method() because it can negotiate use of the highest
-	 * mutually supported protocol version, while alternatives like
-	 * TLSv1_2_method() permit only one specific version.  Note that we don't
-	 * actually allow SSL v2 or v3, only TLS protocols (see below).
 	 */
-	context = SSL_CTX_new(SSLv23_method());
+	context = SSL_CTX_new(TLS_method());
 	if (!context)
 	{
 		ereport(isServerStart ? FATAL : LOG,
@@ -473,7 +468,7 @@ be_tls_init(bool isServerStart)
 			ereport(isServerStart ? FATAL : LOG,
 					(errcode(ERRCODE_CONFIG_FILE_ERROR),
 					 errmsg("could not set SSL protocol version range"),
-					 errdetail("\"%s\" cannot be higher than \"%s\"",
+					 errdetail("\"%s\" cannot be higher than \"%s\".",
 							   "ssl_min_protocol_version",
 							   "ssl_max_protocol_version")));
 			goto error;
@@ -610,11 +605,24 @@ host_context_cleanup_cb(void *arg)
 		SSL_CTX_free(hosts->default_host->ssl_ctx);
 }
 
+
+/*
+ * init_host_context
+ *
+ * Creates and initializes an OpenSSL SSL_CTX structure for the host config
+ * passed in the host parameter.  The SSL_CTX will be initialized with cert,
+ * key, CA and CRL; the remaining options are copied from the main context
+ * during connection setup in case this context ends up being used.
+ *
+ * If an ssl init hook has been defined, and ssl_sni is enabled, then issue a
+ * warning since the hook won't be executed.  hasWarned will be is set to true
+ * to indicate that the warning has been issued, and passing it back as true
+ * will omit future warning to avoid flooding the logs.
+ */
 static bool
-init_host_context(HostsLine *host, bool isServerStart)
+init_host_context(HostsLine *host, bool isServerStart, bool *hasWarned)
 {
-	SSL_CTX    *ctx = SSL_CTX_new(SSLv23_method());
-	static bool init_warned = false;
+	SSL_CTX    *ctx = SSL_CTX_new(TLS_method());
 
 	if (!ctx)
 	{
@@ -636,7 +644,7 @@ init_host_context(HostsLine *host, bool isServerStart)
 		(*openssl_tls_init_hook) (ctx, isServerStart);
 	else
 	{
-		if (openssl_tls_init_hook != default_openssl_tls_init && !init_warned)
+		if (openssl_tls_init_hook != default_openssl_tls_init && !*hasWarned)
 		{
 			ereport(WARNING,
 					errcode(ERRCODE_CONFIG_FILE_ERROR),
@@ -646,8 +654,8 @@ init_host_context(HostsLine *host, bool isServerStart)
 							"Set \"%s\" to \"off\" to make use of the hook "
 							"that is currently installed, or remove the hook "
 							"and use per-host passphrase commands in \"%s\".",
-							"ssl_sni", "pg_hosts.conf"));
-			init_warned = true;
+							"ssl_sni", HostsFileName));
+			*hasWarned = true;
 		}
 
 		/*
@@ -1071,26 +1079,28 @@ aloop:
 	if (port->peer != NULL)
 	{
 		int			len;
-		X509_NAME  *x509name = X509_get_subject_name(port->peer);
+		const X509_NAME *x509name = X509_get_subject_name(port->peer);
 		char	   *peer_dn;
 		BIO		   *bio = NULL;
 		BUF_MEM    *bio_buf = NULL;
+		int			index;
 
-		len = X509_NAME_get_text_by_NID(x509name, NID_commonName, NULL, 0);
-		if (len != -1)
+		index = X509_NAME_get_index_by_NID(unconstify(X509_NAME *, x509name), NID_commonName, -1);
+		if (index >= 0)
 		{
+			const X509_NAME_ENTRY *entry;
+			const ASN1_STRING *peer_cn_asn1;
+			const unsigned char *peer_cn_internal;
 			char	   *peer_cn;
 
+			entry = X509_NAME_get_entry(unconstify(X509_NAME *, x509name), index);
+			peer_cn_asn1 = X509_NAME_ENTRY_get_data(entry);
+			len = ASN1_STRING_length(peer_cn_asn1);
+			peer_cn_internal = ASN1_STRING_get0_data(peer_cn_asn1);
+
 			peer_cn = MemoryContextAlloc(TopMemoryContext, len + 1);
-			r = X509_NAME_get_text_by_NID(x509name, NID_commonName, peer_cn,
-										  len + 1);
+			memcpy(peer_cn, peer_cn_internal, len);
 			peer_cn[len] = '\0';
-			if (r != len)
-			{
-				/* shouldn't happen */
-				pfree(peer_cn);
-				return -1;
-			}
 
 			/*
 			 * Reject embedded NULLs in certificate common name to prevent
@@ -1349,7 +1359,7 @@ port_bio_read(BIO *h, char *buf, int size)
 
 	if (buf != NULL)
 	{
-		res = secure_raw_read(port, buf, size);
+		res = (int) secure_raw_read(port, buf, size);
 		BIO_clear_retry_flags(h);
 		port->last_read_was_eof = res == 0;
 		if (res <= 0)
@@ -1370,7 +1380,7 @@ port_bio_write(BIO *h, const char *buf, int size)
 {
 	int			res = 0;
 
-	res = secure_raw_write(((Port *) BIO_get_data(h)), buf, size);
+	res = (int) secure_raw_write(((Port *) BIO_get_data(h)), buf, size);
 	BIO_clear_retry_flags(h);
 	if (res <= 0)
 	{
@@ -2115,7 +2125,6 @@ initialize_dh(SSL_CTX *context, bool isServerStart)
 static bool
 initialize_ecdh(SSL_CTX *context, bool isServerStart)
 {
-#ifndef OPENSSL_NO_ECDH
 	if (SSL_CTX_set1_groups_list(context, SSLECDHCurve) != 1)
 	{
 		/*
@@ -2133,7 +2142,6 @@ initialize_ecdh(SSL_CTX *context, bool isServerStart)
 				errhint("Ensure that each group name is spelled correctly and supported by the installed version of OpenSSL."));
 		return false;
 	}
-#endif
 
 	return true;
 }
@@ -2274,7 +2282,12 @@ be_tls_get_certificate_hash(Port *port, size_t *len)
 {
 	X509	   *server_cert;
 	char	   *cert_hash;
+#if OPENSSL_VERSION_NUMBER >= 0x30000000L
+	EVP_MD	   *algo_type;
+	const char *algo_name;
+#else
 	const EVP_MD *algo_type = NULL;
+#endif
 	unsigned char hash[EVP_MAX_MD_SIZE];	/* size for SHA-512 */
 	unsigned int hash_size;
 	int			algo_nid;
@@ -2303,6 +2316,25 @@ be_tls_get_certificate_hash(Port *port, size_t *len)
 	 * (https://tools.ietf.org/html/rfc5929#section-4.1).  If something else
 	 * is used, the same hash as the signature algorithm is used.
 	 */
+#if OPENSSL_VERSION_NUMBER >= 0x30000000L
+	switch (algo_nid)
+	{
+		case NID_md5:
+		case NID_sha1:
+			algo_name = "SHA256";
+			break;
+		default:
+			algo_name = OBJ_nid2sn(algo_nid);
+			if (algo_name == NULL)
+				elog(ERROR, "could not find digest for NID %d",
+					 algo_nid);
+			break;
+	}
+
+	algo_type = EVP_MD_fetch(NULL, algo_name, NULL);
+	if (algo_type == NULL)
+		elog(ERROR, "could not fetch digest \"%s\"", algo_name);
+#else
 	switch (algo_nid)
 	{
 		case NID_md5:
@@ -2316,10 +2348,20 @@ be_tls_get_certificate_hash(Port *port, size_t *len)
 					 OBJ_nid2sn(algo_nid));
 			break;
 	}
+#endif
 
 	/* generate and save the certificate hash */
 	if (!X509_digest(server_cert, algo_type, hash, &hash_size))
+	{
+#if OPENSSL_VERSION_NUMBER >= 0x30000000L
+		EVP_MD_free(algo_type);
+#endif
 		elog(ERROR, "could not generate server certificate hash");
+	}
+
+#if OPENSSL_VERSION_NUMBER >= 0x30000000L
+	EVP_MD_free(algo_type);
+#endif
 
 	cert_hash = palloc(hash_size);
 	memcpy(cert_hash, hash, hash_size);
@@ -2333,14 +2375,14 @@ be_tls_get_certificate_hash(Port *port, size_t *len)
  *
  */
 static char *
-X509_NAME_to_cstring(X509_NAME *name)
+X509_NAME_to_cstring(const X509_NAME *name)
 {
 	BIO		   *membuf = BIO_new(BIO_s_mem());
 	int			i,
 				nid,
 				count = X509_NAME_entry_count(name);
-	X509_NAME_ENTRY *e;
-	ASN1_STRING *v;
+	const X509_NAME_ENTRY *e;
+	const ASN1_STRING *v;
 	const char *field_name;
 	size_t		size;
 	char		nullterm;
@@ -2413,21 +2455,25 @@ ssl_protocol_version_to_openssl(int v)
 		case PG_TLS_ANY:
 			return 0;
 		case PG_TLS1_VERSION:
+#ifndef OPENSSL_NO_TLS1
 			return TLS1_VERSION;
+#else
+			break;
+#endif
 		case PG_TLS1_1_VERSION:
-#ifdef TLS1_1_VERSION
+#ifndef OPENSSL_NO_TLS1_1
 			return TLS1_1_VERSION;
 #else
 			break;
 #endif
 		case PG_TLS1_2_VERSION:
-#ifdef TLS1_2_VERSION
+#ifndef OPENSSL_NO_TLS1_2
 			return TLS1_2_VERSION;
 #else
 			break;
 #endif
 		case PG_TLS1_3_VERSION:
-#ifdef TLS1_3_VERSION
+#ifndef OPENSSL_NO_TLS1_3
 			return TLS1_3_VERSION;
 #else
 			break;

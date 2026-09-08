@@ -193,7 +193,7 @@ InitArchiveFmt_Custom(ArchiveHandle *AH)
  * Optional.
  *
  * Set up extract format-related TOC data.
-*/
+ */
 static void
 _ArchiveEntry(ArchiveHandle *AH, TocEntry *te)
 {
@@ -563,7 +563,7 @@ _PrintTocData(ArchiveHandle *AH, TocEntry *te)
 
 /*
  * Print data from current file position.
-*/
+ */
 static void
 _PrintData(ArchiveHandle *AH)
 {
@@ -617,7 +617,7 @@ _skipLOs(ArchiveHandle *AH)
  * Skip data from current file position.
  * Data blocks are formatted as an integer length, followed by data.
  * A zero length indicates the end of the block.
-*/
+ */
 static void
 _skipData(ArchiveHandle *AH)
 {
@@ -645,7 +645,7 @@ _skipData(ArchiveHandle *AH)
 		{
 			if (blkLen > buflen)
 			{
-				free(buf);
+				pg_free(buf);
 				buflen = Max(blkLen, 4 * 1024);
 				buf = (char *) pg_malloc(buflen);
 			}
@@ -661,7 +661,7 @@ _skipData(ArchiveHandle *AH)
 		blkLen = ReadInt(AH);
 	}
 
-	free(buf);
+	pg_free(buf);
 }
 
 /*

@@ -12,7 +12,8 @@
  *
  *-------------------------------------------------------------------------
  */
-/* INTERFACE ROUTINES
+/*
+ * INTERFACE ROUTINES
  *		ExecInitBitmapAnd	- initialize the BitmapAnd node
  *		MultiExecBitmapAnd	- retrieve the result bitmap from the node
  *		ExecEndBitmapAnd	- shut down the BitmapAnd node
@@ -71,7 +72,7 @@ ExecInitBitmapAnd(BitmapAnd *node, EState *estate, int eflags)
 	 */
 	nplans = list_length(node->bitmapplans);
 
-	bitmapplanstates = (PlanState **) palloc0(nplans * sizeof(PlanState *));
+	bitmapplanstates = palloc0_array(PlanState *, nplans);
 
 	/*
 	 * create new BitmapAndState for our BitmapAnd node

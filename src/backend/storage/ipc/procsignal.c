@@ -189,6 +189,15 @@ ProcSignalInit(const uint8 *cancel_key, int cancel_key_len)
 	MemSet(slot->pss_signalFlags, 0, NUM_PROCSIGNALS * sizeof(sig_atomic_t));
 
 	/*
+	 * Publish the PID before reading the global barrier generation to ensure
+	 * that EmitProcSignalBarrier() doesn't skip us while we are grabbing an
+	 * older generation. We need a memory barrier here to make sure that the
+	 * update of pss_pid is ordered before the subsequent load of
+	 * psh_barrierGeneration.
+	 */
+	pg_atomic_write_membarrier_u32(&slot->pss_pid, MyProcPid);
+
+	/*
 	 * Initialize barrier state. Since we're a brand-new process, there
 	 * shouldn't be any leftover backend-private state that needs to be
 	 * updated. Therefore, we can broadcast the latest barrier generation and
@@ -207,7 +216,6 @@ ProcSignalInit(const uint8 *cancel_key, int cancel_key_len)
 	if (cancel_key_len > 0)
 		memcpy(slot->pss_cancel_key, cancel_key, cancel_key_len);
 	slot->pss_cancel_key_len = cancel_key_len;
-	pg_atomic_write_u32(&slot->pss_pid, MyProcPid);
 
 	SpinLockRelease(&slot->pss_mutex);
 
@@ -287,7 +295,7 @@ CleanupProcSignalState(int status, Datum arg)
 int
 SendProcSignal(pid_t pid, ProcSignalReason reason, ProcNumber procNumber)
 {
-	volatile ProcSignalSlot *slot;
+	ProcSignalSlot *slot;
 
 	if (procNumber != INVALID_PROC_NUMBER)
 	{
@@ -372,7 +380,7 @@ EmitProcSignalBarrier(ProcSignalBarrierType type)
 	 */
 	for (int i = 0; i < NumProcSignalSlots; i++)
 	{
-		volatile ProcSignalSlot *slot = &ProcSignal->psh_slot[i];
+		ProcSignalSlot *slot = &ProcSignal->psh_slot[i];
 
 		pg_atomic_fetch_or_u32(&slot->pss_barrierCheckMask, flagbit);
 	}
@@ -398,7 +406,7 @@ EmitProcSignalBarrier(ProcSignalBarrierType type)
 	 */
 	for (int i = NumProcSignalSlots - 1; i >= 0; i--)
 	{
-		volatile ProcSignalSlot *slot = &ProcSignal->psh_slot[i];
+		ProcSignalSlot *slot = &ProcSignal->psh_slot[i];
 		pid_t		pid = pg_atomic_read_u32(&slot->pss_pid);
 
 		if (pid != 0)
@@ -662,7 +670,7 @@ ResetProcSignalBarrierBits(uint32 flags)
 static bool
 CheckProcSignal(ProcSignalReason reason)
 {
-	volatile ProcSignalSlot *slot = MyProcSignalSlot;
+	ProcSignalSlot *slot = MyProcSignalSlot;
 
 	if (slot != NULL)
 	{

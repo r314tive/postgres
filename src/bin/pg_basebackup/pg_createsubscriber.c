@@ -139,7 +139,7 @@ static void wait_for_end_recovery(const char *conninfo,
 static void create_publication(PGconn *conn, struct LogicalRepInfo *dbinfo);
 static bool find_publication(PGconn *conn, const char *pubname, const char *dbname);
 static void drop_publication(PGconn *conn, const char *pubname,
-							 const char *dbname, bool *made_publication);
+							 const char *dbname);
 static void check_and_drop_publications(PGconn *conn, struct LogicalRepInfo *dbinfo);
 static void create_subscription(PGconn *conn, const struct LogicalRepInfo *dbinfo);
 static void set_replication_progress(PGconn *conn, const struct LogicalRepInfo *dbinfo,
@@ -245,8 +245,7 @@ cleanup_objects_atexit(void)
 			if (conn != NULL)
 			{
 				if (dbinfo->made_publication)
-					drop_publication(conn, dbinfo->pubname, dbinfo->dbname,
-									 &dbinfo->made_publication);
+					drop_publication(conn, dbinfo->pubname, dbinfo->dbname);
 				if (dbinfo->made_replslot)
 					drop_replication_slot(conn, dbinfo, dbinfo->replslotname);
 				disconnect_database(conn, false);
@@ -759,7 +758,7 @@ modify_subscriber_sysid(const struct CreateSubscriberOptions *opt)
 	cmd_str = psprintf("\"%s\" -D \"%s\" >> \"%s\"", pg_resetwal_path,
 					   subscriber_dir, out_file);
 	if (opt->log_dir)
-		pg_free(out_file);
+		pfree(out_file);
 
 	pg_log_debug("pg_resetwal command is: %s", cmd_str);
 
@@ -773,8 +772,8 @@ modify_subscriber_sysid(const struct CreateSubscriberOptions *opt)
 			pg_fatal("could not reset WAL on subscriber: %s", wait_result_to_str(rc));
 	}
 
-	pg_free(cf);
-	pg_free(cmd_str);
+	pfree(cf);
+	pfree(cmd_str);
 }
 
 /*
@@ -1257,18 +1256,23 @@ drop_existing_subscription(PGconn *conn, const char *subname, const char *dbname
 {
 	PQExpBuffer query = createPQExpBuffer();
 	PGresult   *res;
+	char	   *subname_esc;
 
 	Assert(conn != NULL);
+
+	subname_esc = PQescapeIdentifier(conn, subname, strlen(subname));
 
 	/*
 	 * Construct a query string. These commands are allowed to be executed
 	 * within a transaction.
 	 */
 	appendPQExpBuffer(query, "ALTER SUBSCRIPTION %s DISABLE;",
-					  subname);
+					  subname_esc);
 	appendPQExpBuffer(query, " ALTER SUBSCRIPTION %s SET (slot_name = NONE);",
-					  subname);
-	appendPQExpBuffer(query, " DROP SUBSCRIPTION %s;", subname);
+					  subname_esc);
+	appendPQExpBuffer(query, " DROP SUBSCRIPTION %s;", subname_esc);
+
+	PQfreemem(subname_esc);
 
 	if (dry_run)
 		pg_log_info("dry-run: would drop subscription \"%s\" in database \"%s\"",
@@ -1624,7 +1628,6 @@ drop_replication_slot(PGconn *conn, struct LogicalRepInfo *dbinfo,
 		{
 			pg_log_error("could not drop replication slot \"%s\" in database \"%s\": %s",
 						 slot_name, dbinfo->dbname, PQresultErrorMessage(res));
-			dbinfo->made_replslot = false;	/* don't try again. */
 		}
 
 		PQclear(res);
@@ -1866,8 +1869,7 @@ create_publication(PGconn *conn, struct LogicalRepInfo *dbinfo)
  * Drop the specified publication in the given database.
  */
 static void
-drop_publication(PGconn *conn, const char *pubname, const char *dbname,
-				 bool *made_publication)
+drop_publication(PGconn *conn, const char *pubname, const char *dbname)
 {
 	PQExpBuffer str = createPQExpBuffer();
 	PGresult   *res;
@@ -1897,7 +1899,6 @@ drop_publication(PGconn *conn, const char *pubname, const char *dbname,
 		{
 			pg_log_error("could not drop publication \"%s\" in database \"%s\": %s",
 						 pubname, dbname, PQresultErrorMessage(res));
-			*made_publication = false;	/* don't try again. */
 
 			/*
 			 * Don't disconnect and exit here. This routine is used by primary
@@ -1946,8 +1947,7 @@ check_and_drop_publications(PGconn *conn, struct LogicalRepInfo *dbinfo)
 
 		/* Drop each publication */
 		for (int i = 0; i < PQntuples(res); i++)
-			drop_publication(conn, PQgetvalue(res, i, 0), dbinfo->dbname,
-							 &dbinfo->made_publication);
+			drop_publication(conn, PQgetvalue(res, i, 0), dbinfo->dbname);
 
 		PQclear(res);
 	}
@@ -1956,8 +1956,7 @@ check_and_drop_publications(PGconn *conn, struct LogicalRepInfo *dbinfo)
 		/* Drop publication only if it was created by this tool */
 		if (dbinfo->made_publication)
 		{
-			drop_publication(conn, dbinfo->pubname, dbinfo->dbname,
-							 &dbinfo->made_publication);
+			drop_publication(conn, dbinfo->pubname, dbinfo->dbname);
 		}
 		else
 		{
@@ -2129,8 +2128,8 @@ set_replication_progress(PGconn *conn, const struct LogicalRepInfo *dbinfo, cons
 
 	PQfreemem(subname);
 	PQfreemem(dbname);
-	pg_free(originname);
-	pg_free(lsnstr);
+	pfree(originname);
+	pfree(lsnstr);
 	destroyPQExpBuffer(str);
 }
 
@@ -2382,13 +2381,8 @@ main(int argc, char **argv)
 				opt.config_file = pg_strdup(optarg);
 				break;
 			case 2:
-				if (!simple_string_list_member(&opt.pub_names, optarg))
-				{
-					simple_string_list_append(&opt.pub_names, optarg);
-					num_pubs++;
-				}
-				else
-					pg_fatal("publication \"%s\" specified more than once for --publication", optarg);
+				simple_string_list_append(&opt.pub_names, optarg);
+				num_pubs++;
 				break;
 			case 3:
 				if (!simple_string_list_member(&opt.replslot_names, optarg))
@@ -2514,14 +2508,16 @@ main(int argc, char **argv)
 		if (!internal_log_file_fp)
 			pg_fatal("could not open log file \"%s\": %m", internal_log_file);
 
-		pg_free(internal_log_file);
+		pfree(internal_log_file);
 
 		pg_logging_set_logfile(internal_log_file_fp);
 	}
 
 	if (dry_run)
-		pg_log_info("Executing in dry-run mode.\n"
-					"The target directory will not be modified.");
+	{
+		pg_log_info("executing in dry-run mode");
+		pg_log_info_detail("The target directory will not be modified.");
+	}
 
 	pg_log_info("validating publisher connection string");
 	pub_base_conninfo = get_base_conninfo(opt.pub_conninfo_str,

@@ -220,7 +220,7 @@ pg_logging_unset_logfile(void)
 
 void
 pg_log_generic(enum pg_log_level level, enum pg_log_part part,
-			   const char *pg_restrict fmt,...)
+			   const char *pg_restrict fmt, ...)
 {
 	va_list		ap;
 
@@ -360,5 +360,5 @@ pg_log_generic_v(enum pg_log_level level, enum pg_log_part part,
 		fflush(log_logfile);
 	}
 
-	free(buf);
+	pg_free(buf);
 }

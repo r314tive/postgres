@@ -102,35 +102,11 @@ extern char *output_files[];
 
 
 /*
- * The format of visibility map was changed with this 9.6 commit.
- */
-#define VISIBILITY_MAP_FROZEN_BIT_CAT_VER 201603011
-
-/*
- * pg_multixact format changed in 9.3 commit 0ac5ad5134f2769ccbaefec73844f85,
- * ("Improve concurrency of foreign key locking") which also updated catalog
- * version to this value.  pg_upgrade behavior depends on whether old and new
- * server versions are both newer than this, or only the new one is.
- */
-#define MULTIXACT_FORMATCHANGE_CAT_VER 201301231
-
-/*
  * MultiXactOffset was changed from 32-bit to 64-bit in version 19, at this
  * catalog version.  pg_multixact files need to be converted when upgrading
  * across this version.
  */
 #define MULTIXACTOFFSET_FORMATCHANGE_CAT_VER 202512091
-
-/*
- * large object chunk size added to pg_controldata,
- * commit 5f93c37805e7485488480916b4585e098d3cc883
- */
-#define LARGE_OBJECT_SIZE_PG_CONTROL_VER 942
-
-/*
- * change in JSONB format during 9.4 beta
- */
-#define JSONB_FORMAT_CHANGE_CAT_VER 201409291
 
 /*
  * The control file was changed to have the default char signedness,
@@ -318,7 +294,7 @@ typedef struct
 
 /*
  *	LogOpts
-*/
+ */
 typedef struct
 {
 	FILE	   *internal;		/* internal log FILE */
@@ -335,7 +311,7 @@ typedef struct
 
 /*
  *	UserOpts
-*/
+ */
 typedef struct
 {
 	bool		check;			/* check clusters only, don't change any data */
@@ -414,7 +390,7 @@ void		generate_old_dump(void);
 #define EXEC_PSQL_ARGS "--echo-queries --set ON_ERROR_STOP=on --no-psqlrc --dbname=template1"
 
 bool		exec_prog(const char *log_filename, const char *opt_log_file,
-					  bool report_error, bool exit_on_error, const char *fmt,...) pg_attribute_printf(5, 6);
+					  bool report_error, bool exit_on_error, const char *fmt, ...) pg_attribute_printf(5, 6);
 void		verify_directories(void);
 bool		pid_lock_file_exists(const char *datadir);
 
@@ -429,8 +405,6 @@ void		copyFileByRange(const char *src, const char *dst,
 							const char *schemaName, const char *relName);
 void		linkFile(const char *src, const char *dst,
 					 const char *schemaName, const char *relName);
-void		rewriteVisibilityMap(const char *fromfile, const char *tofile,
-								 const char *schemaName, const char *relName);
 void		check_file_clone(void);
 void		check_copy_file_range(void);
 void		check_hard_link(transferMode transfer_mode);
@@ -474,7 +448,7 @@ void		init_tablespaces(void);
 /* server.c */
 
 PGconn	   *connectToServer(ClusterInfo *cluster, const char *db_name);
-PGresult   *executeQueryOrDie(PGconn *conn, const char *fmt,...) pg_attribute_printf(2, 3);
+PGresult   *executeQueryOrDie(PGconn *conn, const char *fmt, ...) pg_attribute_printf(2, 3);
 
 char	   *cluster_conn_opts(ClusterInfo *cluster);
 
@@ -488,22 +462,20 @@ void		check_pghost_envvar(void);
 char	   *quote_identifier(const char *s);
 int			get_user_info(char **user_name_p);
 void		check_ok(void);
-void		report_status(eLogType type, const char *fmt,...) pg_attribute_printf(2, 3);
-void		pg_log(eLogType type, const char *fmt,...) pg_attribute_printf(2, 3);
-pg_noreturn void pg_fatal(const char *fmt,...) pg_attribute_printf(1, 2);
+void		report_status(eLogType type, const char *fmt, ...) pg_attribute_printf(2, 3);
+void		pg_log(eLogType type, const char *fmt, ...) pg_attribute_printf(2, 3);
+pg_noreturn void pg_fatal(const char *fmt, ...) pg_attribute_printf(1, 2);
 void		end_progress_output(void);
 void		cleanup_output_dirs(void);
-void		prep_status(const char *fmt,...) pg_attribute_printf(1, 2);
-void		prep_status_progress(const char *fmt,...) pg_attribute_printf(1, 2);
+void		prep_status(const char *fmt, ...) pg_attribute_printf(1, 2);
+void		prep_status_progress(const char *fmt, ...) pg_attribute_printf(1, 2);
 unsigned int str2uint(const char *str);
+uint64		str2uint64(const char *str);
 
 
 /* version.c */
 
-bool		jsonb_9_4_check_applicable(ClusterInfo *cluster);
 bool		protocol_negotiation_supported(const ClusterInfo *cluster);
-void		old_9_6_invalidate_hash_indexes(ClusterInfo *cluster,
-											bool check_mode);
 
 void		report_extension_updates(ClusterInfo *cluster);
 
@@ -512,7 +484,7 @@ MultiXactOffset rewrite_multixacts(MultiXactId from_multi, MultiXactId to_multi)
 
 /* parallel.c */
 void		parallel_exec_prog(const char *log_file, const char *opt_log_file,
-							   const char *fmt,...) pg_attribute_printf(3, 4);
+							   const char *fmt, ...) pg_attribute_printf(3, 4);
 void		parallel_transfer_all_new_dbs(DbInfoArr *old_db_arr, DbInfoArr *new_db_arr,
 										  char *old_pgdata, char *new_pgdata,
 										  char *old_tablespace, char *new_tablespace);

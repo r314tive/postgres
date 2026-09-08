@@ -140,7 +140,7 @@ static void manifest_process_wal_range(JsonManifestParseContext *context,
 									   XLogRecPtr start_lsn,
 									   XLogRecPtr end_lsn);
 pg_noreturn static void manifest_report_error(JsonManifestParseContext *context,
-											  const char *fmt,...)
+											  const char *fmt, ...)
 			pg_attribute_printf(2, 3);
 static int	compare_block_numbers(const void *a, const void *b);
 
@@ -310,7 +310,7 @@ PrepareForIncrementalBackup(IncrementalBackupInfo *ib,
 	 * to the beginning.
 	 */
 	expectedTLEs = readTimeLineHistory(backup_state->starttli);
-	tlep = palloc0(num_wal_ranges * sizeof(TimeLineHistoryEntry *));
+	tlep = palloc0_array(TimeLineHistoryEntry *, num_wal_ranges);
 	for (int i = 0; i < num_wal_ranges; ++i)
 	{
 		backup_wal_range *range = list_nth(ib->manifest_wal_ranges, i);
@@ -1018,7 +1018,7 @@ manifest_process_wal_range(JsonManifestParseContext *context,
  * manifest.
  */
 static void
-manifest_report_error(JsonManifestParseContext *context, const char *fmt,...)
+manifest_report_error(JsonManifestParseContext *context, const char *fmt, ...)
 {
 	StringInfoData errbuf;
 
